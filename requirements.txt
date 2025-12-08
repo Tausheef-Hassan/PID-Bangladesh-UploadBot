@@ -1,0 +1,14 @@
+opencv-python==4.8.1.78
+numpy==1.24.3
+pandas==2.0.3
+requests==2.31.0
+Pillow==10.0.0
+beautifulsoup4==4.12.2
+google-cloud-vision==3.4.4
+google-cloud-translate==3.11.3
+google-auth==2.22.0
+google-generativeai==0.8.3
+openpyxl==3.1.2
+Flask==2.3.3
+pywikibot==8.3.0
+lxml==4.9.3
