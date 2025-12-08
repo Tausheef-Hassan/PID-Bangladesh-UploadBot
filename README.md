@@ -342,3 +342,829 @@ This project is licensed under the MIT License. See LICENSE file for details.
 ---
 
 **Status:** Active | **Last Updated:** December 2025 | **Version:** 0.1.1a0
+
+
+# Technical Documentation: PID-Bangladesh-UploadBot
+
+## Complete Processing Flow
+
+This document provides a detailed technical explanation of how the bot processes images from the Press Information Department (PID) of Bangladesh.
+
+---
+
+## High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Bot Workflow                             │
+└─────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    │   1. DISCOVERY PHASE    │
+                    └────────────┬────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │  2. PROCESSING PHASE    │
+                    └────────────┬────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │    3. UPLOAD PHASE      │
+                    └────────────┬────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │    4. LOGGING PHASE     │
+                    └─────────────────────────┘
+```
+
+---
+
+## Phase 1: Discovery Phase (Web Scraping)
+
+### Purpose
+Discover new images from the PID website that haven't been uploaded to Commons yet.
+
+### Detailed Flow
+
+```
+START
+  │
+  ├─► Fetch Module:PIDDateData/{current_year} from Commons
+  │   └─► Extract all previously uploaded image URLs
+  │
+  ├─► Fetch Module:PIDDateData/{previous_year} from Commons
+  │   └─► Extract all previously uploaded image URLs
+  │
+  ├─► Combine into a set of "already uploaded" URLs
+  │
+  ├─► Initialize page counter (page_num = 1)
+  ├─► Initialize consecutive_matches = 0
+  │
+  └─► LOOP: While consecutive_matches < 50
+       │
+       ├─► Scrape page_num from PID website
+       │   URL: https://pressinform.gov.bd/site/view/daily_photo_archive/-?page={page_num}
+       │
+       ├─► Parse HTML tables to extract:
+       │   ├─► Image URL
+       │   └─► Publication date/time
+       │
+       ├─► For each image found:
+       │   ├─► Normalize URL (remove protocol, decode URL encoding)
+       │   ├─► Check if normalized URL exists in "already uploaded" set
+       │   │
+       │   ├─► IF EXISTS:
+       │   │   ├─► Skip this image
+       │   │   └─► Increment consecutive_matches
+       │   │
+       │   └─► IF NEW:
+       │       ├─► Generate unique ID: PID_{date}_{hash}_{counter}
+       │       ├─► Add to Excel: [unique_id, date, url]
+       │       ├─► Reset consecutive_matches = 0
+       │       └─► Increment entry_counter
+       │
+       ├─► Increment page_num
+       ├─► Sleep 1 second (rate limiting)
+       │
+       └─► IF consecutive_matches >= 50: BREAK
+           (Found 50 images in a row that were already uploaded)
+
+IF no new images found:
+  └─► Return None (skip processing, log "no new images")
+ELSE:
+  └─► Save Excel file to ~/output/pressinform_photos_{timestamp}.xlsx
+  └─► Return Excel file path
+
+END
+```
+
+### Key Functions
+
+**`scrape_data()`**
+- Main scraping orchestrator
+- Creates Excel workbook with columns: [Unique ID, Date, Image URL]
+- Stops after finding 50 consecutive duplicates
+
+**`fetch_wikimedia_data(year)`**
+- Downloads Module:PIDDateData/{year} from Commons
+- Parses Lua table to extract previously uploaded URLs
+- Returns set of normalized URLs
+
+**`normalize_url(url)`**
+- Removes protocol (http:// or https://)
+- Standardizes domain variations
+- Decodes URL encoding for consistent comparison
+
+**`scrape_page(page_num, wikimedia_urls)`**
+- Fetches single page from PID website
+- Parses HTML tables with BeautifulSoup
+- Returns list of (image_url, date) tuples
+
+---
+
+## Phase 2: Processing Phase (Image Processing)
+
+This is the most complex phase, involving image analysis, OCR, translation, and metadata generation.
+
+### Detailed Flow
+
+```
+FOR each row in Excel file:
+  │
+  ├─► STEP 2.1: Download Image
+  │   ├─► Fetch image from URL
+  │   ├─► IF 404 error:
+  │   │   └─► Try Wayback Machine to retrieve archived version
+  │   │
+  │   ├─► Load with PIL (Python Imaging Library)
+  │   ├─► Store EXIF data
+  │   ├─► Apply EXIF orientation correction
+  │   ├─► Convert CMYK → RGB if needed
+  │   ├─► Convert PIL → NumPy array → OpenCV BGR format
+  │   └─► Return: (opencv_image, format, exif_data, error_status)
+  │
+  ├─► STEP 2.2: Find White Separator
+  │   │
+  │   ├─► Scan image to find white/light separator bar
+  │   │   between photo and caption sections
+  │   │
+  │   ├─► PRIMARY METHOD:
+  │   │   ├─► Scan columns at edges (first 4 and last 4 columns)
+  │   │   ├─► From bottom to 40% height, find uniform color sections
+  │   │   ├─► Identify horizontal line with 98% uniform color
+  │   │   ├─► Calculate offset: round(2 + 3/log(3100/670) × log(height/670))
+  │   │   └─► separator_row = cutoff_row - offset
+  │   │
+  │   └─► FALLBACK METHOD (if primary fails or result is ~40% height):
+  │       ├─► Start from 75% height
+  │       ├─► Scan downward for consecutive white/near-white lines
+  │       ├─► Count consecutive similar lines
+  │       └─► separator_row = detected_row - offset
+  │
+  ├─► STEP 2.3: Crop Image Sections
+  │   ├─► IF separator found:
+  │   │   ├─► photo_section = image[0:separator_row]
+  │   │   ├─► text_section = image[separator_row:bottom]
+  │   │   └─► IF fallback was used: crop side whitespace
+  │   │
+  │   └─► IF no separator:
+  │       └─► Use entire image for both photo and OCR
+  │
+  ├─► STEP 2.4: Perform OCR
+  │   ├─► Encode text_section as PNG
+  │   ├─► Send to Google Cloud Vision API
+  │   ├─► Extract Bengali text with language hints: ['bn', 'en']
+  │   ├─► Clean text:
+  │   │   ├─► Replace '|' with '।' (Bengali punctuation)
+  │   │   └─► Remove "পিআইডি" (PID) suffixes
+  │   └─► Return cleaned OCR text
+  │
+  ├─► Save to Excel: OCR text, status
+  │
+  ├─► STEP 2.5: Translate Text
+  │   ├─► Send Bengali text to Google Gemini 2.5 Flash
+  │   ├─► Prompt: "Translate to encyclopedic English, retain all info"
+  │   ├─► IF response contains Bengali characters:
+  │   │   └─► Fallback to Google Translate API
+  │   │
+  │   ├─► Retry logic: Try primary model → fallback model → error
+  │   └─► Return: (translated_text, status)
+  │
+  ├─► Save to Excel: translation, translation status
+  │
+  ├─► STEP 2.6: Generate Filename
+  │   ├─► Combine: translation + date
+  │   ├─► Send to Google Gemini 2.5 Flash
+  │   ├─► Prompt: "Create Commons-compliant filename ≤240 bytes"
+  │   ├─► AI generates descriptive filename
+  │   ├─► Replace incorrect dates (if >7 days difference)
+  │   ├─► Add file extension: .jpg or .png
+  │   └─► Return: (filename_with_extension, status)
+  │
+  └─► Save to Excel: title, title status
+
+NEXT row
+```
+
+---
+
+## Detailed: Image Cropping Mechanism
+
+### Problem Statement
+
+PID images have embedded captions at the bottom that look like this:
+
+```
+┌─────────────────────────────────────┐
+│                                     │
+│         ACTUAL PHOTOGRAPH           │
+│                                     │
+│─────────────────────────────────────│ ← White separator bar
+│                                     │
+│  Bengali Caption Text               │
+│  প্রকাশের তারিখ: 2024-11-15           │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+**Goal:** Separate the photo from the caption text.
+
+### Primary Separator Detection Algorithm
+
+#### Step 1: Column Scanning
+
+```python
+# Scan columns at edges (avoid middle content)
+first_columns = [1, 2, 3, 4]  # Left edge
+last_columns = [width-5, width-4, width-3, width-2]  # Right edge
+
+for each column:
+    start from bottom (height - 6)
+    scan upward to 40% of image height
+    
+    for each pixel moving upward:
+        if first pixel in scan:
+            start color_samples = [current_pixel]
+        else:
+            calculate average of color_samples
+            if current_pixel matches average (within 2% tolerance):
+                add to color_samples
+                continue scanning upward
+            else:
+                # Found where uniform color ends
+                record column_height = pixels_from_bottom
+                break
+```
+
+**What this finds:** Height of uniform-colored section at bottom of each edge column.
+
+#### Step 2: Horizontal Line Validation
+
+```python
+# Find columns with similar heights (within 4 pixels)
+for first_col in first_columns:
+    for last_col in last_columns:
+        if abs(column_heights[first_col] - column_heights[last_col]) <= 4:
+            
+            # Scan the horizontal line between these columns
+            scan_row = max(uniform_top_of_first_col, uniform_top_of_last_col)
+            row_pixels = image[scan_row, first_col:last_col]
+            
+            # Check if this row is uniformly colored
+            calculate average color of row
+            count pixels matching average (within 2% tolerance)
+            
+            if matching_percentage >= 98%:
+                # This is a valid separator line
+                valid_lines.append(scan_row)
+```
+
+**What this finds:** Horizontal lines that are uniformly colored across the width.
+
+#### Step 3: Calculate Final Separator Position
+
+```python
+cutoff_row = min(valid_lines)  # Topmost valid line
+
+# Calculate dynamic offset based on image height
+# This accounts for different image sizes
+offset = round(2 + 3/log(3100/670) × log(height/670))
+if offset < 2:
+    offset = 2
+
+separator_row = cutoff_row - offset
+```
+
+**Why the offset?** The white bar has some thickness. We want to cut *above* the bar, not in the middle of it.
+
+### Fallback Separator Detection Algorithm
+
+Used when:
+1. Primary method finds no separator
+2. Detected separator is around 40% of image height (suspicious)
+
+#### Fallback Method
+
+```python
+start_row = int(height × 0.75)  # Start at 75% from top
+
+required_consecutive_lines = round((4 / log(3100/670)) × log(height/670) + 5)
+consecutive_similar_lines = 0
+
+for y from start_row to bottom:
+    row = image[y]
+    
+    # Check if row matches white (255,255,255) or near-white (250,249,251)
+    white_matching = pixels within 2% of (255,255,255)
+    fbf9fa_matching = pixels within 2% of (250,249,251)
+    
+    matching_percentage = (white_matching OR fbf9fa_matching) / width
+    
+    if matching_percentage >= 98%:
+        consecutive_similar_lines += 1
+        
+        if consecutive_similar_lines >= required_consecutive_lines:
+            # Found enough consecutive white lines
+            if consecutive_similar_lines >= 10:
+                offset = consecutive_similar_lines + 5
+            elif consecutive_similar_lines in [1, 2, 3]:
+                offset = 2
+            else:
+                offset = consecutive_similar_lines + 5
+            
+            separator_row = y - offset
+            break
+    else:
+        consecutive_similar_lines = 0  # Reset counter
+```
+
+**What this does:** Scans from 75% downward looking for a thick band of white lines.
+
+### Side Whitespace Cropping
+
+Only applied when fallback method is used:
+
+```python
+# Scan from left
+for x from 0 to width:
+    column = image[:, x]
+    
+    if 98% of pixels are white/near-white:
+        left_crop = x + 1
+    else:
+        break
+
+# Scan from right
+for x from width-1 to 0:
+    column = image[:, x]
+    
+    if 98% of pixels are white/near-white:
+        right_crop = x
+    else:
+        break
+
+# Expand boundaries slightly to avoid cutting content
+expansion = int(round((4 / log(3100/670)) × log(height/670) + 5))
+left_expanded = max(0, left_crop - expansion)
+right_expanded = min(width, right_crop + expansion)
+
+cropped_image = image[:, left_expanded:right_expanded]
+```
+
+### Visual Example
+
+```
+Original Image (1000×1500 pixels):
+
+┌─────────────────────────────────────┐ 0
+│                                     │
+│                                     │
+│         Actual Photograph           │ photo_section
+│                                     │
+│                                     │
+├─────────────────────────────────────┤ 1000 ← separator_row detected here
+│   White/light gray separator bar    │
+├─────────────────────────────────────┤ 1020
+│                                     │
+│   Bengali Caption:                  │ text_section
+│   বাংলাদেশের প্রধানমন্ত্রী...             │ (sent to OCR)
+│   2024-11-15 14:30:00 pm            │
+│                                     │
+└─────────────────────────────────────┘ 1500
+
+After Cropping:
+
+photo_section = image[0:1000, :]      → Uploaded to Commons
+text_section = image[1000:1500, :]    → Sent to OCR API
+```
+
+---
+
+## Phase 3: Upload Phase
+
+### Detailed Flow
+
+```
+FOR each successfully processed image:
+  │
+  ├─► STEP 3.1: Prepare Description
+  │   └─► Generate wikitext:
+  │       {{Information
+  │        |description = {{bn|1=<bengali_text>}}{{en|1=<english_translation>}}
+  │        |date = {{Date-PID|<date>}}
+  │        |source = {{Source-PID | url=<original_url>}}
+  │        |author = {{Institution:Press Information Department}}
+  │       }}
+  │       {{PD-BDGov-PID}}
+  │       [[Category: Uploaded with pypan]]
+  │
+  ├─► STEP 3.2: Save Image Temporarily
+  │   ├─► Convert OpenCV BGR → PIL RGB
+  │   ├─► Save with EXIF data preserved
+  │   ├─► Format: PNG (optimize=True) or JPEG (quality=95)
+  │   └─► Return temp file path
+  │
+  ├─► STEP 3.3: Upload to Commons
+  │   ├─► Initialize Pywikibot FilePage
+  │   ├─► Check if file already exists
+  │   │   └─► IF EXISTS: Skip (return "File already exists")
+  │   │
+  │   ├─► Attempt upload (max 10 attempts)
+  │   │   ├─► file_page.upload(
+  │   │   │       source=temp_file,
+  │   │   │       comment="Pypan 0.1.1a0",
+  │   │   │       text=description,
+  │   │   │       ignore_warnings=True
+  │   │   │   )
+  │   │   │
+  │   │   ├─► IF upload fails: Wait 10 seconds, retry
+  │   │   └─► IF success: Return True
+  │   │
+  │   └─► Clean up temp file
+  │
+  ├─► STEP 3.4: Update Module:PIDDateData
+  │   ├─► Generate entry: ["<url>"] = "<date>",
+  │   ├─► Fetch Module:PIDDateData/{current_year}
+  │   ├─► Find last closing brace: }
+  │   ├─► Insert new entry before closing brace
+  │   ├─► Save page with summary: "added another image"
+  │   └─► Return success/failure
+  │
+  └─► Update Excel: upload status, PIDDateData status
+
+NEXT image
+```
+
+### Pywikibot Authentication
+
+```
+Configuration Files Required:
+
+1. ~/pywikibot/user-config.py:
+   family = 'commons'
+   mylang = 'commons'
+   usernames['commons']['commons'] = 'PID-Bangladesh-UploadBot'
+
+2. ~/pywikibot/user-password.py:
+   ('PID-Bangladesh-UploadBot', BotPassword('<username>', '<password>'))
+   
+   Get bot password from:
+   https://commons.wikimedia.org/wiki/Special:BotPasswords
+```
+
+---
+
+## Phase 4: Logging Phase
+
+### Detailed Flow
+
+```
+AFTER all images processed:
+  │
+  ├─► Convert DataFrame to Wikitable format
+  │   ├─► Add column headers
+  │   ├─► For each row:
+  │   │   ├─► Column 0 (Unique ID): Add [[File:title|100px]] thumbnail
+  │   │   ├─► Column 12 (Description): Wrap in <nowiki> tags
+  │   │   └─► Other columns: Escape wiki markup (| → {{!}})
+  │   │
+  │   └─► Generate complete wikitable with sortable class
+  │
+  ├─► Generate log page title:
+  │   └─► User:PID-Bangladesh-UploadBot/Log/{Month} {Year}
+  │       Example: User:PID-Bangladesh-UploadBot/Log/December 2025
+  │
+  ├─► Create log entry:
+  │   == YYYY-MM-DD HH:MM:SS UTC ==
+  │   Processed N images. Successful uploads: X, Failed: Y
+  │   
+  │   {wikitable with all processing details}
+  │
+  ├─► IF page exists:
+  │   └─► Append log entry to existing content
+  │   
+  └─► IF page doesn't exist:
+      └─► Create new page with header + log entry
+  │
+  ├─► Save page with summary: "Bot log update"
+  │
+  └─► IF logging successful:
+      └─► Delete temporary Excel file
+
+END
+```
+
+---
+
+## Error Handling & Retry Logic
+
+### Retry Decorator
+
+```python
+@retry_on_failure(max_attempts=10, delay=2)
+def risky_function():
+    # Automatically retries up to 10 times
+    # Waits 2 seconds between attempts
+    pass
+```
+
+**Applied to:**
+- Image download
+- Wayback Machine retrieval
+- OCR operations
+- API calls
+
+### Exponential Backoff
+
+For AI model calls (Gemini):
+
+```python
+Initial backoff: 1.0 second
+Multiplier: 2.0×
+Max backoff: 60 seconds
+
+Attempt 1: Wait 1.0s
+Attempt 2: Wait 2.0s
+Attempt 3: Wait 4.0s
+Attempt 4: Wait 8.0s
+Attempt 5: Wait 16.0s
+...
+Attempt N: Wait min(1.0 × 2^N, 60.0)s
+```
+
+### Model Fallback Chain
+
+```
+Translation/Title Generation:
+  ├─► Try: gemini-2.5-flash (PRIMARY_MODEL)
+  │   └─► Max 5 attempts with backoff
+  │
+  └─► Fallback: gemini-2.0-flash-001 (FALLBACK_MODEL)
+      └─► Max 5 attempts with backoff
+      
+  If both fail → Return error status
+```
+
+---
+
+## Google Cloud APIs Configuration
+
+### Required APIs
+
+1. **Cloud Vision API**
+   - Used for: OCR (text detection)
+   - Language hints: Bengali (bn) and English (en)
+   - Input: PNG-encoded image bytes
+   - Output: Text annotations
+
+2. **Cloud Translation API**
+   - Used for: Fallback translation when Gemini returns Bengali
+   - Source: Bengali (bn)
+   - Target: English (en)
+
+3. **Vertex AI API (Gemini)**
+   - Used for: Translation and filename generation
+   - Location: us-central1
+   - Models: gemini-2.5-flash, gemini-2.0-flash-001
+   - Temperature: 1.0, Top-p: 0.95
+
+### Credentials Setup
+
+```python
+# Option 1: Environment Variable (Production)
+export GOOGLE_APPLICATION_CREDENTIALS_JSON='{"type":"service_account",...}'
+
+# Option 2: JSON File (Development)
+Place JSON file in same directory as main.py
+
+# At runtime:
+load_credentials() → setup_credentials() → Initialize clients
+```
+
+---
+
+## Data Flow Diagram
+
+```
+PID Website
+    │
+    ├─→ Scraper → Excel File (Unique ID, Date, URL)
+    │                 │
+    │                 ├─→ ImageProcessor
+    │                 │       ├─→ Download Image
+    │                 │       ├─→ Find Separator
+    │                 │       ├─→ Crop Sections
+    │                 │       └─→ OCR (Vision API)
+    │                 │
+    │                 ├─→ Translator (Gemini + Translate API)
+    │                 │       └─→ Bengali → English
+    │                 │
+    │                 ├─→ Title Generator (Gemini)
+    │                 │       └─→ Commons-compliant filename
+    │                 │
+    │                 ├─→ Pywikibot Uploader
+    │                 │       ├─→ Upload to Commons
+    │                 │       └─→ Update Module:PIDDateData
+    │                 │
+    │                 └─→ Logger
+    │                         └─→ Create wikitable on Commons
+    │
+    └─→ Module:PIDDateData (Commons)
+            └─→ Track uploaded URLs
+```
+
+---
+
+## Performance & Rate Limiting
+
+### Rate Limits
+
+- **Web Scraping:** 1 second delay between pages
+- **Commons Upload:** 12 uploads per minute (5 seconds between uploads)
+- **API Calls:** 
+  - OCR: 2 seconds after each call
+  - Translation: 2 seconds after each call
+  - Title Generation: 2 seconds after each call
+- **PIDDateData Update:** 5 seconds after each upload
+
+### Resource Usage
+
+- **Memory:** Primarily image data in RAM (1-5 MB per image)
+- **Disk:** Temporary files cleaned up after each upload
+- **Network:** Sustained API calls to Google Cloud and Commons
+- **Runtime:** ~2-5 minutes per image (with AI processing)
+
+### Toolforge Job Configuration
+
+```bash
+Schedule: 7 * * * *  (Every hour at 7 minutes past)
+Timeout: 55 minutes (3300 seconds)
+Image: python3.13
+Resources: default
+Retry: No (to avoid duplicate runs)
+```
+
+---
+
+## Excel Data Structure
+
+| Column | Content | Description |
+|--------|---------|-------------|
+| A | Unique ID | PID_{date}_{hash}_{counter} |
+| B | Date | YYYY-MM-DD HH:MM:SS format |
+| C | Image URL | Original PID URL |
+| D | (empty) | Reserved |
+| E | OCR Text | Bengali caption extracted |
+| F | Status | Processing status |
+| G | Translation | English translation |
+| H | Trans Status | Translation success/error |
+| I | Title | Generated filename with extension |
+| J | Title Status | Title generation success/error |
+| K | Data Entry | Lua table entry for Module:PIDDateData |
+| L | PIDDateData Status | Update success/error |
+| M | Description | Complete wikitext for file page |
+| N | Upload Status | Upload success/error |
+
+---
+
+## Key Algorithms Summary
+
+### 1. URL Normalization
+- Remove protocol
+- Standardize domain variations
+- URL decode
+- Result: Consistent string for comparison
+
+### 2. Separator Detection
+- **Primary:** Edge column scanning + horizontal validation
+- **Fallback:** Consecutive white line detection
+- **Offset calculation:** Dynamic based on image height
+- **Result:** Y-coordinate to split image
+
+### 3. Color Matching
+- Tolerance: 2% (255 × 0.02 = ~5 units per channel)
+- Matches: White (255,255,255) and near-white (250,249,251)
+- Threshold: 98% of pixels must match
+
+### 4. Date Validation
+- Extract dates from title and source
+- If difference > 7 days: Replace with source date
+- Ensures accuracy of temporal metadata
+
+---
+
+## Common Edge Cases
+
+### Case 1: No Separator Found
+- **Action:** Use entire image for both photo and OCR
+- **Status:** "No separator found - using full image"
+
+### Case 2: 404 Error
+- **Action:** Try Wayback Machine
+- **If successful:** Use archived image, note in status
+- **If failed:** Skip image, log error
+
+### Case 3: CMYK Images
+- **Action:** Convert to RGB before processing
+- **Reason:** OpenCV doesn't support CMYK natively
+
+### Case 4: Gemini Returns Bengali
+- **Action:** Detect Bengali characters, fallback to Google Translate
+- **Reason:** Ensures English output
+
+### Case 5: Title > 240 Bytes
+- **Action:** Retry with same prompt (AI may generate shorter title)
+- **Max retries:** 5
+- **If still too long:** Fail with error
+
+---
+
+## Success Criteria
+
+An image is considered successfully processed when:
+
+1. ✅ Image downloaded (or retrieved from Wayback Machine)
+2. ✅ Separator detected OR full image used
+3. ✅ OCR extracted text
+4. ✅ Translation to English succeeded
+5. ✅ Filename generated (≤240 bytes)
+6. ✅ Uploaded to Commons
+7. ✅ Module:PIDDateData updated
+8. ✅ Logged to Commons
+
+Any failure in steps 1-5 → Skip to next image  
+Any failure in steps 6-7 → Log as "failed upload"
+
+---
+
+## Monitoring & Debugging
+
+### Log Files (Toolforge)
+
+```bash
+# View output log
+cat ~/pid-bangladesh-uploadbot.out
+
+# View error log
+cat ~/pid-bangladesh-uploadbot.err
+
+# Check job status
+toolforge jobs list
+toolforge jobs show pid-upload-bot
+```
+
+### Commons Logs
+
+Monthly log pages contain:
+- Thumbnail of each uploaded image
+- All processing data (OCR, translation, title, etc.)
+- Success/failure status for each step
+- Searchable and sortable wikitable
+
+### Debug Checklist
+
+```
+Issue: No images found
+├─→ Check: Is Module:PIDDateData up to date?
+├─→ Check: Is PID website accessible?
+└─→ Check: Are there actually new images on PID site?
+
+Issue: OCR fails
+├─→ Check: Is Vision API quota exceeded?
+├─→ Check: Is image actually in Bengali?
+└─→ Check: Network connectivity to Google Cloud
+
+Issue: Upload fails
+├─→ Check: Is bot logged in? (Pywikibot credentials)
+├─→ Check: Does filename already exist?
+├─→ Check: Is filename valid? (illegal characters, length)
+└─→ Check: Network connectivity to Commons
+
+Issue: Translation contains Bengali
+├─→ Check: Did fallback to Google Translate trigger?
+├─→ Check: Google Translate API credentials
+└─→ Expected: Rare, but handled automatically
+```
+
+---
+
+## Future Improvements
+
+Potential enhancements mentioned in documentation:
+
+1. **Structured Data (Depicts)**
+   - Add depicts statements post-upload
+   - Requires Pywikibot feature enhancement
+
+2. **Automated Categorization**
+   - ML-based person recognition
+   - Pre-defined category lists for ministers/officials
+
+3. **Quality Improvements**
+   - Higher OCR confidence thresholds
+   - Manual review queue for borderline cases
+
+4. **Performance Optimization**
+   - Parallel processing of multiple images
+   - Batch API calls where possible
+
+---
