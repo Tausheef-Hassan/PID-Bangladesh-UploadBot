@@ -7,25 +7,34 @@ import numpy as np
 import pandas as pd
 import requests
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageFile, ImageOps
 from bs4 import BeautifulSoup
 import warnings
 warnings.filterwarnings('ignore')
 from urllib.parse import quote, unquote
-from google.cloud import vision, translate_v2 as translate
-from google.oauth2 import service_account
+from google.cloud import translate_v2 as translate
+from googleapiclient.discovery import build as gdrive_build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google import genai
+import time
 from time import sleep
 from functools import wraps
 from datetime import datetime
 import hashlib
 import tempfile
 import json
-import time
 import random
 import logging
 from openpyxl import Workbook
 from flask import Flask
+import pywikibot
+from pywikibot import FilePage
+from pywikibot.exceptions import UploadError
+import socket
+import urllib3.util.connection as urllib3_cn
+import traceback
 
 # Setup logging
 logging.basicConfig(
@@ -52,6 +61,10 @@ MAX_BACKOFF = 60.0
 # Google Cloud credentials - will be loaded from JSON file
 GOOGLE_CREDENTIALS = None
 
+# OAuth2 token for Google Drive OCR
+DRIVE_TOKEN_PATH = os.path.join(SCRIPT_DIR, 'drive_token.json')
+DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
 TRANSLATION_PROMPT = (
     'Translate the following Bengali text into English in enclyclopedic style. '
     'You may rearrange words or sentences for clarity, but retain all information. '
@@ -64,9 +77,6 @@ TITLE_PROMPT = (
     'Convert this image description (below) into a single Wikimedia Commons–compliant filename (do NOT add the "File:" prefix, or wikitext, or Title:, do not add filename extention). Follow Wikimedia Commons file naming guidelines: be descriptive, specific, precise, concise and neutral; include date as YYYY-MM-DD if present; avoid photographer/source-only names. Remove any political bias or references to previous governments and strip flattering/propagandistic/honorific language. Output ONLY the filename (no explanation), Regular Case, remove illegal filesystem characters but KEEP spaces and comma and hyphen, keep ≤240 bytes, and do not add filename extention. '
     'Text: "{text}"'
 )
-
-import socket
-import urllib3.util.connection as urllib3_cn
 
 def allowed_gai_family():
     """Force IPv4 connections only"""
@@ -149,7 +159,6 @@ def fetch_wikimedia_data(year):
                 content = response.text
 
                 if 'api.php' in url:
-                    import json
                     data = json.loads(content)
                     pages = data.get('query', {}).get('pages', [])
                     if pages and len(pages) > 0:
@@ -182,62 +191,189 @@ def fetch_wikimedia_data(year):
     print(f"Could not fetch Wikimedia data for {year}")
     return set()
 
-def extract_date_from_text(date_text):
-    """Extract date and time from Bengali or English date string"""
-    date_text = date_text.replace('প্রকাশের তারিখ:', '').strip()
-    match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[ap]m)', date_text)
-    if match:
-        return match.group(1)
-    match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', date_text)
-    if match:
-        return match.group(1)
-    return date_text.strip()
+def convert_bengali_date_to_english(bengali_date_text):
+    """Convert Bengali date to English yyyy-mm-dd hh:mm:ss format"""
+    # Bengali to English digit mapping
+    bengali_digits = {'০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4',
+                     '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9'}
 
-def scrape_page(page_num, wikimedia_urls):
-    """Scrape a single page and return list of (url, date) tuples"""
-    url = f"https://pressinform.gov.bd/site/view/daily_photo_archive/-?page={page_num}&rows=1"
-    print(f"Scraping page {page_num}...")
+    # Bengali to English month mapping
+    bengali_months = {
+        'জানুয়ারী': '01', 'জানুয়ারি': '01',
+        'ফেব্রুয়ারী': '02', 'ফেব্রুয়ারি': '02',
+        'মার্চ': '03',
+        'এপ্রিল': '04',
+        'মে': '05',
+        'জুন': '06',
+        'জুলাই': '07',
+        'আগস্ট': '08',
+        'সেপ্টেম্বর': '09',
+        'অক্টোবর': '10',
+        'নভেম্বর': '11',
+        'ডিসেম্বর': '12'
+    }
+
+    try:
+        # Extract date from text like "বৃহস্পতিবার, ৮ জানুয়ারী, ২০২৬ এ ০৯:৪৩ PM"
+        # Pattern: day, date month, year এ time AM/PM
+        match = re.search(r'([০-৯\d]+)\s+([^\s,]+),?\s+([০-৯\d]+)\s+এ\s+([০-৯\d]+):([০-৯\d]+)\s+(AM|PM)', bengali_date_text)
+
+        if not match:
+            return ""
+
+        day = match.group(1)
+        month_bengali = match.group(2)
+        year = match.group(3)
+        hour = match.group(4)
+        minute = match.group(5)
+        am_pm = match.group(6)
+
+        # Convert Bengali digits to English
+        day_en = ''.join(bengali_digits.get(c, c) for c in day)
+        year_en = ''.join(bengali_digits.get(c, c) for c in year)
+        hour_en = ''.join(bengali_digits.get(c, c) for c in hour)
+        minute_en = ''.join(bengali_digits.get(c, c) for c in minute)
+
+        # Convert month
+        month_en = bengali_months.get(month_bengali, '01')
+
+        # Convert to 24-hour format
+        hour_int = int(hour_en)
+        if am_pm == 'PM' and hour_int != 12:
+            hour_int += 12
+        elif am_pm == 'AM' and hour_int == 12:
+            hour_int = 0
+
+        # Format as yyyy-mm-dd hh:mm:ss
+        formatted_date = f"{year_en}-{month_en.zfill(2)}-{day_en.zfill(2)} {str(hour_int).zfill(2)}:{minute_en.zfill(2)}:00"
+
+        return formatted_date
+
+    except Exception as e:
+        print(f"Error converting Bengali date: {e}")
+        return ""
+
+def fetch_detail_date(detail_href):
+    """Fetch date from a detail page, with retries. Returns date string or empty string."""
+    detail_url = f"https://pressinform.gov.bd{detail_href}"
+    detail_max_retries = 10
+    for detail_attempt in range(detail_max_retries):
+        try:
+            detail_response = requests.get(detail_url, timeout=10, verify=False)
+            if detail_response.status_code == 200:
+                detail_soup = BeautifulSoup(detail_response.content, 'html.parser')
+                # Try div.content-update-block first, then any <p> containing Bengali date pattern
+                date_element = detail_soup.find('div', class_='content-update-block')
+                if not date_element:
+                    # Fallback: find a <p> tag containing the Bengali date pattern (এ + AM/PM)
+                    for p in detail_soup.find_all('p'):
+                        if 'এ' in p.get_text() and ('AM' in p.get_text() or 'PM' in p.get_text()):
+                            date_element = p
+                            break
+                if date_element:
+                    date_text = date_element.get_text()
+                    print(f"Date text found: {date_text.strip()}")
+                    result = convert_bengali_date_to_english(date_text)
+                    if result:
+                        return result
+                    else:
+                        print(f"Date conversion failed for text: {date_text.strip()}")
+                        return ""
+                else:
+                    print(f"No date found on detail page: {detail_url}")
+                return ""
+            else:
+                print(f"Failed to fetch detail page (attempt {detail_attempt + 1}/{detail_max_retries}): {detail_url} - Status {detail_response.status_code}")
+                if detail_attempt < detail_max_retries - 1:
+                    time.sleep(2 ** detail_attempt)
+        except Exception as e:
+            print(f"Error fetching detail page (attempt {detail_attempt + 1}/{detail_max_retries}) {detail_url}: {e}")
+            if detail_attempt < detail_max_retries - 1:
+                time.sleep(2 ** detail_attempt)
+    return ""
+
+
+def scrape_page(page_num, wikimedia_urls, hard_stop_url):
+    """Scrape a single page (page_size=50) row by row.
+    Returns (results, hard_stop_hit) where results is a list of (img_url, detail_href) tuples
+    for images not yet in Wikimedia, and hard_stop_hit is True if the hard stop URL was encountered.
+    Date fetching is deferred — only done for images that need uploading.
+    """
+    url = f"https://pressinform.gov.bd/pages/daily-photos?archived=true&page={page_num}&page_size=50"
+    print(f"Scraping page {page_num} (50 items)...")
 
     max_retries = 10
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=10, verify=False)
             if response.status_code != 200:
-                print(f"Failed to fetch page {page_num}")
-                return []
+                print(f"Failed to fetch page {page_num} (status {response.status_code})")
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                return [], False
 
             soup = BeautifulSoup(response.content, 'html.parser')
-            tables = soup.find_all('table', class_='bordered')
+            table = soup.find('table', id='noticeTable')
+
+            if not table:
+                print(f"No table found on page {page_num}")
+                return [], False
 
             results = []
+            hard_stop_hit = False
+            total_images_seen = 0
+            rows = table.find('tbody', class_='table-tbody').find_all('tr', class_='table-tr')
 
-            for table in tables:
-                header = table.find('h3')
-                if header and 'আজকের ফটো রিলিজ' in header.get_text():
-                    date_elem = table.find('h4')
-                    if date_elem:
-                        date = extract_date_from_text(date_elem.get_text())
+            for row in rows:
+                # Skip the search input row
+                if 'toggle-hidden' in row.get('class', []):
+                    continue
+
+                # Find image TD
+                img_td = row.find('td', {'data-column': 'file'})
+                if not img_td:
+                    continue
+
+                # Get ALL img tags in this TD
+                img_tags = img_td.find_all('img')
+                if not img_tags:
+                    continue
+
+                detail_link = row.find('a', href=lambda x: x and '/pages/daily-photos/' in x and x != '#')
+                detail_href = detail_link['href'] if detail_link else None
+
+                # Collect new image URLs for this row, stopping at hard stop
+                for img_tag in img_tags:
+                    if not img_tag.get('src'):
+                        continue
+                    img_url = img_tag['src']
+                    normalized_url = normalize_url(img_url)
+                    if hard_stop_url in normalized_url:
+                        print(f"\n{'='*60}")
+                        print("HARD STOP: Reached the specified stopping point")
+                        print(f"Image URL: {img_url}")
+                        print(f"{'='*60}")
+                        hard_stop_hit = True
+                        break  # Do not include this image or any after it in this row
+                    total_images_seen += 1
+                    # Only keep images not already in Wikimedia
+                    if normalized_url not in wikimedia_urls:
+                        results.append((img_url, detail_href))
                     else:
-                        date = ""
+                        print(f"Skipping (already in Wikimedia): {img_url}")
 
-                    img = table.find('img')
-                    if img and img.get('src'):
-                        img_url = img['src']
-                        results.append((img_url, date))
-                else:
-                    thead = table.find('thead')
-                    if thead:
-                        rows = table.find('tbody').find_all('tr')
-                        for row in rows:
-                            cells = row.find_all('td')
-                            if len(cells) >= 3:
-                                date = extract_date_from_text(cells[1].get_text())
-                                img = cells[2].find('img')
-                                if img and img.get('src'):
-                                    img_url = img['src']
-                                    results.append((img_url, date))
+                if hard_stop_hit:
+                    break  # Stop processing further rows on this page
 
-            return results
+            # If page had no images at all (not just all-uploaded), treat as end of content
+            if total_images_seen == 0 and not hard_stop_hit:
+                print(f"Page {page_num}: no images found at all, end of content")
+                return None, False  # None signals "end of content" vs [] which means "all uploaded"
+
+            return results, hard_stop_hit
 
         except Exception as e:
             wait_time = 2 ** attempt
@@ -247,12 +383,12 @@ def scrape_page(page_num, wikimedia_urls):
                 time.sleep(wait_time)
             else:
                 print(f"Failed after {max_retries} attempts")
-                return []
+                return [], False
+
+    return [], False
 
 def scrape_data():
     """Scrape data from pressinform.gov.bd"""
-    from bs4 import BeautifulSoup
-
     output_dir = os.path.expanduser('~/output')
     os.makedirs(output_dir, exist_ok=True)
 
@@ -271,40 +407,50 @@ def scrape_data():
     wb = Workbook()
     ws = wb.active
 
-    consecutive_matches = 0
+    fully_uploaded_pages = 0
     page_num = 1
     entry_counter = 1
 
-    while consecutive_matches < 50:
-        results = scrape_page(page_num, wikimedia_urls)
+    # Hard stop URL - if this image is encountered, stop scraping
+    HARD_STOP_URL = "objectstorage.ap-dcc-gazipur-1.oraclecloud15.com/n/axvjbnqprylg/b/V2Ministry/o/office-pressinform/2024/12/ec18321a25e844ab9503b7b704aafb34.jpg"
 
-        if not results:
-            print(f"No results found on page {page_num}")
-            consecutive_matches += 1
-            page_num += 1
-            time.sleep(1)
-            continue
+    while fully_uploaded_pages < 3:
+        new_items, hard_stop_hit = scrape_page(page_num, wikimedia_urls, HARD_STOP_URL)
 
-        page_has_new = False
-        for img_url, date in results:
-            normalized_url = normalize_url(img_url)
+        if new_items is None:
+            print(f"Page {page_num}: no images found, end of content. Stopping scraper.")
+            break
 
-            if normalized_url in wikimedia_urls:
-                print(f"Skipping (already in Wikimedia): {img_url}")
-                consecutive_matches += 1
-            else:
+        if hard_stop_hit and not new_items:
+            print(f"Hard stop reached on page {page_num} with no new items. Stopping scraper.")
+            break
+
+        if not new_items and not hard_stop_hit:
+            # scrape_page filters out already-uploaded images, so empty means fully uploaded page
+            fully_uploaded_pages += 1
+            print(f"Page {page_num}: all items already uploaded ({fully_uploaded_pages}/3 fully-uploaded pages)")
+        else:
+            fully_uploaded_pages = 0
+            # Fetch dates only for new images
+            for img_url, detail_href in new_items:
+                if detail_href:
+                    date = fetch_detail_date(detail_href)
+                    time.sleep(0.5)
+                else:
+                    date = ""
+                    print(f"No detail link for image: {img_url}")
                 unique_id = generate_unique_id(img_url, date, entry_counter)
                 print(f"Adding: {unique_id} | {date} | {img_url}")
                 ws.append([unique_id, date, img_url])
                 entry_counter += 1
-                consecutive_matches = 0
-                page_has_new = True
+            print(f"Page {page_num}: {len(new_items)} new items added")
 
-        if not page_has_new:
-            print(f"All entries on page {page_num} already exist in Wikimedia")
+        if hard_stop_hit:
+            print(f"Hard stop reached on page {page_num}. Stopping scraper.")
+            break
 
-        if consecutive_matches >= 50:
-            print(f"\nFound 50 consecutive matches. Stopping.")
+        if fully_uploaded_pages >= 3:
+            print(f"\nStopping scraper: 3 consecutive fully-uploaded pages of 50.")
             break
 
         page_num += 1
@@ -329,16 +475,22 @@ def scrape_data():
 
 class ImageProcessor:
     def __init__(self):
-        self.vision_client = None
+        self._drive_service = None
 
     def initialize_vision_client(self):
-        """Initialize Google Cloud Vision API client"""
+        """Initialize Google Drive OCR using OAuth2 user credentials"""
         try:
-            credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
-            self.vision_client = vision.ImageAnnotatorClient(credentials=credentials)
-            return True, "Vision API initialized successfully"
+            if not os.path.exists(DRIVE_TOKEN_PATH):
+                raise RuntimeError("drive_token.json not found. Run generate_token.py first.")
+            creds = Credentials.from_authorized_user_file(DRIVE_TOKEN_PATH, DRIVE_SCOPES)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(GoogleAuthRequest())
+                with open(DRIVE_TOKEN_PATH, 'w') as f:
+                    f.write(creds.to_json())
+            self._drive_service = gdrive_build('drive', 'v3', credentials=creds)
+            return True, "Drive OCR initialized with user OAuth2 credentials"
         except Exception as e:
-            return False, f"Failed to initialize Vision API: {str(e)}"
+            return False, f"Failed to initialize Drive OCR: {str(e)}"
 
     @retry_on_failure(max_attempts=10, delay=2)
     def get_wayback_url(self, url):
@@ -382,23 +534,19 @@ class ImageProcessor:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30, verify=False)
             response.raise_for_status()
-
-            from PIL import ImageFile, ImageOps
+            
             ImageFile.LOAD_TRUNCATED_IMAGES = True
 
             img_pil = Image.open(BytesIO(response.content))
 
             # Store EXIF data before any processing
             exif_data = img_pil.info.get('exif', None)
-
-            # CRITICAL FIX: Apply EXIF orientation before any processing
             img_pil = ImageOps.exif_transpose(img_pil)
 
-            # CRITICAL FIX: Convert CMYK to RGB if needed
+            # onvert CMYK to RGB if needed
             if img_pil.mode == 'CMYK':
-                # Convert CMYK to RGB using PIL's conversion
                 img_pil = img_pil.convert('RGB')
             elif img_pil.mode not in ('RGB', 'L', 'RGBA'):
                 # Convert any other color mode to RGB
@@ -438,21 +586,17 @@ class ImageProcessor:
                         headers = {
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                         }
-                        response = requests.get(wayback_url, headers=headers, timeout=30)
+                        response = requests.get(wayback_url, headers=headers, timeout=30, verify=False)
                         response.raise_for_status()
 
-                        from PIL import ImageFile, ImageOps
                         ImageFile.LOAD_TRUNCATED_IMAGES = True
 
                         img_pil = Image.open(BytesIO(response.content))
 
                         # Store EXIF data before any processing
                         exif_data = img_pil.info.get('exif', None)
-
-                        # CRITICAL FIX: Apply EXIF orientation
                         img_pil = ImageOps.exif_transpose(img_pil)
-
-                        # CRITICAL FIX: Convert CMYK to RGB if needed
+                        # Convert CMYK to RGB if needed
                         if img_pil.mode == 'CMYK':
                             img_pil = img_pil.convert('RGB')
                         elif img_pil.mode not in ('RGB', 'L', 'RGBA'):
@@ -586,9 +730,9 @@ class ImageProcessor:
             fallback_separator = self.find_separator_fallback(image, fallback_start_row)
             if fallback_separator != -1:
                 separator_row = fallback_separator
-                return separator_row, True
+                return separator_row, True, offset
 
-        return separator_row, False
+        return separator_row, False, offset
 
     def find_separator_fallback(self, image, start_row):
         """Fallback method to find separator"""
@@ -715,35 +859,77 @@ class ImageProcessor:
         text = text.replace(' -পিআইডি', '')
         text = text.replace('- পিআইডি', '')
         text = text.replace('-পিআইডি', '')
+        text = text.replace(' ﻿________________ ', '')
+        text = text.replace('________________', '')
+        text = text.replace('  ', ' ')
+        text = text.replace('  ', ' ')
 
         return text
 
     @retry_on_failure(max_attempts=10, delay=2)
     def perform_ocr(self, image):
-        """Perform OCR on the text section using Google Cloud Vision API"""
+        """Perform OCR using Google Drive API (free, replaces Vision API)"""
+        file_id = None
+        temp_path = None
         try:
-            _, buffer = cv2.imencode('.png', image)
-            image_bytes = buffer.tobytes()
+            # Save image section to a temp file
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            cv2.imwrite(temp_path, image)
 
-            vision_image = vision.Image(content=image_bytes)
-            image_context = vision.ImageContext(language_hints=['bn', 'en'])
-
-            response = self.vision_client.text_detection(
-                image=vision_image,
-                image_context=image_context
+            # Upload image to Drive as a Google Doc — Drive OCRs it automatically
+            file_metadata = {
+                'name': 'ocr_temp.png',
+                'mimeType': 'application/vnd.google-apps.document',
+            }
+            media = MediaIoBaseUpload(
+                open(temp_path, 'rb'),
+                mimetype='image/png',
+                resumable=False
             )
+            uploaded = self._drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                ocrLanguage='bn',   # Bengali hint — improves accuracy
+                fields='id'
+            ).execute()
+            file_id = uploaded.get('id')
 
-            if response.text_annotations:
-                raw_text = response.text_annotations[0].description
-                normalized = re.sub(r'\s+', ' ', raw_text).strip()
-                cleaned_text = self.clean_ocr_text(normalized)
+            # Export the OCR'd Google Doc as plain text
+            request = self._drive_service.files().export_media(
+                fileId=file_id,
+                mimeType='text/plain'
+            )
+            text_buffer = BytesIO()
+            downloader = MediaIoBaseDownload(text_buffer, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
 
-                return cleaned_text
-            else:
-                return ""
+            raw_text = text_buffer.getvalue().decode('utf-8', errors='replace')
+
+            # Strip the Drive separator line that appears in exported docs
+            raw_text = raw_text.replace('________________\n\n', '')
+            raw_text = re.sub(r'\s+', ' ', raw_text).strip()
+            cleaned_text = self.clean_ocr_text(raw_text)
+            return cleaned_text
 
         except Exception as e:
             return f"OCR Error: {str(e)}"
+
+        finally:
+            # Always delete the local temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception as del_e:
+                    print(f"Warning: could not delete local temp file {temp_path}: {del_e}")
+            # Always delete the temp file from Drive
+            if file_id:
+                try:
+                    self._drive_service.files().delete(fileId=file_id).execute()
+                except Exception as del_e:
+                    print(f"Warning: could not delete temp Drive file {file_id}: {del_e}")
 
     def process_image(self, row_index, image_url):
         """Process a single image - download, split, OCR"""
@@ -775,7 +961,7 @@ class ImageProcessor:
             result['exif'] = exif_data
 
             print(f"Row {row_index}: Finding separator...")
-            separator_row, fallback_used = self.find_white_separator(image)
+            separator_row, fallback_used, separator_offset = self.find_white_separator(image)
 
             photo_section, text_section = self.crop_image_sections(image, separator_row, apply_side_crop=fallback_used)
 
@@ -783,8 +969,10 @@ class ImageProcessor:
                 result['status'] = 'No separator found - using full image'
                 result['image'] = image
 
-                print(f"Row {row_index}: Performing OCR on full image...")
-                ocr_text = self.perform_ocr(image)
+                print(f"Row {row_index}: Performing OCR on bottom 40% of image...")
+                height_fallback = image.shape[0]
+                ocr_section = image[int(height_fallback * 0.60):, :]
+                ocr_text = self.perform_ocr(ocr_section)
                 result['ocr_text'] = ocr_text
 
                 if ocr_text.startswith("OCR Error"):
@@ -796,8 +984,10 @@ class ImageProcessor:
             else:
                 result['image'] = photo_section
 
-                print(f"Row {row_index}: Performing OCR...")
-                ocr_text = self.perform_ocr(text_section)
+                print(f"Row {row_index}: Performing OCR on text section (trimmed by {1 * separator_offset}px)...")
+                trim_top = min(2 * separator_offset, text_section.shape[0] - 1)
+                ocr_section = text_section[trim_top:, :]
+                ocr_text = self.perform_ocr(ocr_section)
                 result['ocr_text'] = ocr_text
 
                 if ocr_text.startswith("OCR Error"):
@@ -818,6 +1008,43 @@ class ImageProcessor:
 # ============================================================================
 # TRANSLATION FUNCTIONS
 # ============================================================================
+
+def load_translation_replacements():
+    """Load find/replace pairs from translation_replacements.tsv next to main.py.
+    Format: BengaliText|||EnglishReplacement  (one per line, # for comments)
+    """
+    SEPARATOR = '|||'
+    replacements = []
+    tsv_path = os.path.join(SCRIPT_DIR, 'translation_replacements.tsv')
+    if not os.path.exists(tsv_path):
+        logger.info("No translation_replacements.tsv found, skipping pre-translation replacements")
+        return replacements
+    try:
+        with open(tsv_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.rstrip('\n')
+                if not line or line.startswith('#'):
+                    continue
+                if SEPARATOR not in line:
+                    logger.warning(f"translation_replacements.tsv line {line_num}: missing '{SEPARATOR}' separator, skipping: {line!r}")
+                    continue
+                find_text, replace_text = line.split(SEPARATOR, 1)
+                find_text = find_text.strip()
+                replace_text = replace_text.strip()
+                if find_text:
+                    replacements.append((find_text, replace_text))
+        logger.info(f"Loaded {len(replacements)} translation replacements from {tsv_path}")
+    except Exception as e:
+        logger.error(f"Error loading translation_replacements.tsv: {e}")
+    return replacements
+
+
+def apply_translation_replacements(text, replacements):
+    """Apply pre-translation find/replace pairs to Bengali OCR text"""
+    for find_text, replace_text in replacements:
+        text = text.replace(find_text, replace_text)
+    return text
+
 
 def contains_bengali(text):
     """Check if text contains any Bengali characters"""
@@ -1042,9 +1269,6 @@ def initialize_pywikibot():
             logger.error(f"Password file not found: {PASSWORD_FILE_PATH}")
             return None
 
-        import pywikibot
-        from pywikibot import FilePage
-
         site = pywikibot.Site('commons', 'commons')
         site.login()
 
@@ -1053,13 +1277,11 @@ def initialize_pywikibot():
 
     except Exception as e:
         logger.error(f"Failed to initialize Pywikibot: {str(e)}")
-        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description, max_attempts=10):
     """Upload image to Wikimedia Commons"""
-    from pywikibot.exceptions import UploadError
 
     # Filename should already have correct extension from title generation
     # No extension checking or modification here - use filename as-is
@@ -1131,8 +1353,6 @@ def update_pid_date_data(site, data_entry):
     try:
         current_year = datetime.now().year
         page_title = f"Module:PIDDateData/{current_year}"
-
-        import pywikibot
         page = pywikibot.Page(site, page_title)
 
         if not page.exists():
@@ -1157,7 +1377,6 @@ def update_pid_date_data(site, data_entry):
 
     except Exception as e:
         logger.error(f"Error updating PIDDateData: {str(e)}")
-        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
@@ -1204,9 +1423,6 @@ def excel_to_wikitable(df):
 def log_to_commons(site, df=None, success_count=0, failed_count=0, total_rows=0):
     """Log processing results to Wikimedia Commons user page"""
     try:
-        import pywikibot
-        from datetime import datetime
-
         # Generate log page title with current month and year
         current_date = datetime.now()
         month_name = current_date.strftime("%B")  # Full month name (e.g., "November")
@@ -1273,21 +1489,12 @@ def load_credentials():
             print(f"ERROR: Invalid JSON in environment variable: {e}")
 
     # Fallback to JSON file (for local development)
-    try:
-        json_files = [f for f in os.listdir(SCRIPT_DIR) if f.endswith('.json')]
-    except FileNotFoundError:
-        print(f"ERROR: Script directory not found: {SCRIPT_DIR}")
-        sys.exit(1)
-
-    if not json_files:
-        print("ERROR: No credentials found in environment or JSON file")
-        sys.exit(1)
-
-    if len(json_files) > 1:
-        print(f"WARNING: Multiple JSON files found. Using the first one: {json_files[0]}")
-
-    creds_file = os.path.join(SCRIPT_DIR, json_files[0])
+    creds_file = os.path.join(SCRIPT_DIR, 'JSON.json')
     print(f"Loading credentials from: {creds_file}")
+
+    if not os.path.exists(creds_file):
+        print(f"ERROR: Credentials file not found: {creds_file}")
+        sys.exit(1)
 
     try:
         with open(creds_file, 'r') as f:
@@ -1336,6 +1543,19 @@ def main():
         print(f"ERROR: Password file not found: {PASSWORD_FILE_PATH}")
         print("Please create user-password.py in the same directory as this script")
         sys.exit(1)
+
+    # Initialize Pywikibot early for infrastructure checks
+    print("\nInitializing Pywikibot for pre-scrape checks...")
+    _early_pywikibot_result = initialize_pywikibot()
+    if _early_pywikibot_result is None:
+        print("Error: Failed to initialize Pywikibot")
+        sys.exit(1)
+    _early_site, _ = _early_pywikibot_result
+    print("\nChecking and creating categories/modules before scraping...")
+    _ensure_pid_infrastructure(_early_site)
+
+    # Load pre-translation replacements
+    _translation_replacements = load_translation_replacements()
 
     # Step 1: Scrape data
     print("\n" + "=" * 60)
@@ -1433,8 +1653,10 @@ def main():
 
                 # Step 3: Translate Bengali to English
                 print(f"\nSTEP 3: Translating text...")
-                bengali_text = result['ocr_text']
-                print(f"Sanitized OCR Data: {bengali_text}")
+                bengali_text_raw = result['ocr_text']
+                print(f"Sanitized OCR Data: {bengali_text_raw}")
+                bengali_text = apply_translation_replacements(bengali_text_raw, _translation_replacements)
+                print(f"After pre-translation replacements: {bengali_text}")
                 translation, trans_status = translate_text(genai_client, translate_client, bengali_text, idx + 1)
                 print(f"Translation Data: {translation}")
 
@@ -1468,7 +1690,7 @@ def main():
 
                 description = f'''=={{{{int:filedesc}}}}==
 {{{{Information
- |description = {{{{bn|1={bengali_text}}}}}{{{{en|1={translation}{{{{Auto-translated PID English description}}}}}}}}
+ |description = {{{{bn|1={bengali_text_raw.strip().lstrip('\ufeff').strip()}}}}}{{{{en|1={translation.strip()}{{{{Auto-translated PID English description}}}}}}}}
  |date = {{{{Date-PID|{date_str}}}}}
  |source = {{{{Source-PID | url={image_url}}}}}
  |author = {{{{Institution:Press Information Department}}}}
@@ -1544,6 +1766,88 @@ def main():
             os.unlink(creds_path)
         except:
             pass
+
+def _ensure_pid_infrastructure(site):
+    """Ensure all required categories and modules exist for current date"""
+    now = datetime.now()
+    year = now.year
+    month = now.month
+
+    y1 = str(year)[:3]        # e.g. "202"
+    y2 = str(year)[3:]        # e.g. "6"
+    month_padded = str(month).zfill(2)  # e.g. "03"
+    month_name = now.strftime("%B")     # e.g. "March"
+    date_str = now.strftime("%Y-%m-%d") # e.g. "2026-03-09"
+
+    pages_to_ensure = [
+        (
+            f"Category:Bangladesh photographs taken on {date_str}",
+            "{{World photos}}"
+        ),
+        (
+            f"Category:{month_name} {year} Bangladesh photographs",
+            "{{Countryphotomonth}}"
+        ),
+        (
+            f"Category:{month_name} {year} in Bangladesh",
+            "{{{{Monthbyyearbangladesh|{y1}|{y2}|{month}}}}}".format(
+                y1=y1, y2=y2, month=month)
+        ),
+        (
+            f"Category:{year} in Bangladesh",
+            "{{{{Bangladeshyear|{y1}|{y2}}}}}\n{{{{Countries of Asia|prefix=:Category:{year} in }}}}}}\n{{{{Wikidata Infobox}}}}".format(
+                y1=y1, y2=y2, year=year)
+        ),
+        (
+            f"Category:{month_name} {year} in Asia",
+            "{{{{Asiamonthyear|{year}|{month_name}}}}}\n{{{{Wikidata Infobox}}}}".format(
+                year=year, month_name=month_name)
+        ),
+        (
+            f"Category:{month_name} {year} by country",
+            "{{{{Monthbycountryyear|{y1}|{y2}|{month_padded}}}}}\n{{{{Wikidata Infobox}}}}".format(
+                y1=y1, y2=y2, month_padded=month_padded)
+        ),
+        (
+            f"Category:{year} photographs of Bangladesh",
+            "{{{{Bangladesh-photoyear|{y1}|{y2}}}}}".format(y1=y1, y2=y2)
+        ),
+        (
+            f"Category:PID-BD images from {month_name} {year}",
+            "{{PID-BD image category navigation}}"
+        ),
+        (
+            f"Category:PID-BD images from {year}",
+            f"[[Category:Press Information Department images|{year}]]\n"
+            f"[[Category:{year} in Bangladesh]]"
+        ),
+    ]
+
+    for title, content in pages_to_ensure:
+        try:
+            page = pywikibot.Page(site, title)
+            if not page.exists():
+                page.text = content
+                page.save(summary="Creating category for PID uploads")
+                logger.info(f"Created: {title}")
+            else:
+                logger.info(f"Already exists: {title}")
+        except Exception as e:
+            logger.error(f"Error creating {title}: {e}")
+
+    # Ensure Module:PIDDateData/YEAR exists
+    module_title = f"Module:PIDDateData/{year}"
+    try:
+        module_page = pywikibot.Page(site, module_title)
+        if not module_page.exists():
+            module_page.text = "return {\n\n\n}"
+            module_page.save(summary="Creating PIDDateData module for new year")
+            logger.info(f"Created: {module_title}")
+        else:
+            logger.info(f"Already exists: {module_title}")
+    except Exception as e:
+        logger.error(f"Error creating {module_title}: {e}")
+
 
 def run_as_job():
     """Run as a Toolforge job"""
