@@ -18,6 +18,7 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google import genai
+from google.genai import types
 import time
 from time import sleep
 from functools import wraps
@@ -50,9 +51,9 @@ USER_CONFIG_PATH = os.path.expanduser('~/pywikibot/user-config.py')
 PASSWORD_FILE_PATH = os.path.expanduser('~/pywikibot/user-password.py')
 
 # Constants
-VERTEX_LOCATION = "us-central1"
-PRIMARY_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "gemini-2.0-flash-001"
+VERTEX_LOCATION = "global"
+PRIMARY_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-3.5-flash"
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
 BACKOFF_MULTIPLIER = 2.0
@@ -64,6 +65,10 @@ GOOGLE_CREDENTIALS = None
 # OAuth2 token for Google Drive OCR
 DRIVE_TOKEN_PATH = os.path.join(SCRIPT_DIR, 'drive_token.json')
 DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+client = genai.Client(
+  enterprise=True, project="pid-bangladesh", location="global",
+)
 
 TRANSLATION_PROMPT = (
     'Translate the following Bengali text into English in enclyclopedic style. '
@@ -536,7 +541,7 @@ class ImageProcessor:
             }
             response = requests.get(url, headers=headers, timeout=30, verify=False)
             response.raise_for_status()
-            
+
             ImageFile.LOAD_TRUNCATED_IMAGES = True
 
             img_pil = Image.open(BytesIO(response.content))
