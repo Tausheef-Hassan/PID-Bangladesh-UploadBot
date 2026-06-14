@@ -54,6 +54,7 @@ PASSWORD_FILE_PATH = os.path.expanduser('~/pywikibot/user-password.py')
 VERTEX_LOCATION = "global"
 PRIMARY_MODEL = "gemini-3.1-flash-lite"
 FALLBACK_MODEL = "gemini-3.5-flash"
+GEMINI_CONFIG_PATH = os.path.join(SCRIPT_DIR, 'gemini.key') # AI Studio free API key
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
 BACKOFF_MULTIPLIER = 2.0
@@ -65,10 +66,6 @@ GOOGLE_CREDENTIALS = None
 # OAuth2 token for Google Drive OCR
 DRIVE_TOKEN_PATH = os.path.join(SCRIPT_DIR, 'drive_token.json')
 DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
-
-client = genai.Client(
-  enterprise=True, project="pid-bangladesh", location="global",
-)
 
 TRANSLATION_PROMPT = (
     'Translate the following Bengali text into English in enclyclopedic style. '
@@ -89,6 +86,24 @@ def allowed_gai_family():
 
 urllib3_cn.allowed_gai_family = allowed_gai_family
 print("Forced IPv4 connections to avoid K8s networking issues")
+
+def load_gemini_api_key():
+    """Load free AI Studio API key from hidden config file (secondary Google account)"""
+    if not os.path.exists(GEMINI_CONFIG_PATH):
+        raise RuntimeError(
+            f"Gemini config not found: {GEMINI_CONFIG_PATH}\n"
+            f"Fix: echo 'GEMINI_API_KEY=your_key' > {GEMINI_CONFIG_PATH} && chmod 600 {GEMINI_CONFIG_PATH}"
+        )
+    with open(GEMINI_CONFIG_PATH, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('GEMINI_API_KEY='):
+                return line.split('=', 1)[1].strip()
+    raise RuntimeError(f"GEMINI_API_KEY not found in {GEMINI_CONFIG_PATH}")
+
+def compute_checksum(raw_bytes):
+    """Compute MD5 checksum of raw image bytes for duplicate detection"""
+    return hashlib.md5(raw_bytes).hexdigest()
 
 def retry_on_failure(max_attempts=10, delay=2):
     """Decorator to retry function on failure"""
@@ -179,6 +194,7 @@ def fetch_wikimedia_data(year):
                     continue
 
                 urls = set()
+                checksums = set()
                 pattern = r'\["(http[^"]+)"\]'
                 matches = re.findall(pattern, content)
                 print(f"Found {len(matches)} URLs in {year} module")
@@ -187,14 +203,22 @@ def fetch_wikimedia_data(year):
                     normalized = normalize_url(match)
                     urls.add(normalized)
 
+                # Extract checksums from new-format entries - backwards compatible
+                # Old format: ["url"] = "date"
+                # New format: ["url"] = {date="date", checksum="hash"}
+                checksum_pattern = r'\["[^"]+"\]\s*=\s*\{[^}]*checksum\s*=\s*"([^"]+)"'
+                for cs in re.findall(checksum_pattern, content):
+                    checksums.add(cs)
+                print(f"Found {len(checksums)} checksums in {year} module")
+
                 if len(urls) > 0:
-                    return urls
+                    return urls, checksums
         except Exception as e:
             print(f"Error with URL {url}: {e}")
             continue
 
     print(f"Could not fetch Wikimedia data for {year}")
-    return set()
+    return set(), set()
 
 def convert_bengali_date_to_english(bengali_date_text):
     """Convert Bengali date to English yyyy-mm-dd hh:mm:ss format"""
@@ -402,12 +426,13 @@ def scrape_data():
 
     print(f"Current year: {current_year}")
     print("Fetching Wikimedia data...")
-    wikimedia_urls = fetch_wikimedia_data(current_year)
+    wikimedia_urls, wikimedia_checksums = fetch_wikimedia_data(current_year)
     print(f"Loaded {len(wikimedia_urls)} URLs from {current_year}")
-    prev_year_urls = fetch_wikimedia_data(previous_year)
+    prev_year_urls, prev_year_checksums = fetch_wikimedia_data(previous_year)
     print(f"Loaded {len(prev_year_urls)} URLs from {previous_year}")
     wikimedia_urls.update(prev_year_urls)
-    print(f"Total URLs from Wikimedia: {len(wikimedia_urls)}")
+    wikimedia_checksums.update(prev_year_checksums)
+    print(f"Total URLs from Wikimedia: {len(wikimedia_urls)}, checksums: {len(wikimedia_checksums)}")
 
     wb = Workbook()
     ws = wb.active
@@ -464,7 +489,7 @@ def scrape_data():
     # Check if any new entries were added
     if entry_counter == 1:  # No new entries found
         print("\nNo new images found. Skipping Excel file creation.")
-        return None
+        return None, wikimedia_checksums
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(output_dir, f"pressinform_photos_{timestamp}.xlsx")
@@ -472,7 +497,7 @@ def scrape_data():
     print(f"\nData saved to {output_file}")
     print(f"Total rows written: {ws.max_row}")
 
-    return output_file
+    return output_file, wikimedia_checksums
 
 # ============================================================================
 # IMAGE PROCESSOR FUNCTIONS
@@ -544,7 +569,8 @@ class ImageProcessor:
 
             ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-            img_pil = Image.open(BytesIO(response.content))
+            raw_bytes = response.content
+            img_pil = Image.open(BytesIO(raw_bytes))
 
             # Store EXIF data before any processing
             exif_data = img_pil.info.get('exif', None)
@@ -579,9 +605,9 @@ class ImageProcessor:
                 else:
                     img_cv = img_np
             else:
-                return None, None, "Invalid image format"
+                return None, None, None, None, "Invalid image format"
 
-            return img_cv, img_format, exif_data, None
+            return img_cv, img_format, exif_data, raw_bytes, None
 
         except requests.exceptions.RequestException as e:
             if "404" in str(e) or (hasattr(e, 'response') and e.response is not None and e.response.status_code == 404):
@@ -596,7 +622,8 @@ class ImageProcessor:
 
                         ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-                        img_pil = Image.open(BytesIO(response.content))
+                        raw_bytes = response.content
+                        img_pil = Image.open(BytesIO(raw_bytes))
 
                         # Store EXIF data before any processing
                         exif_data = img_pil.info.get('exif', None)
@@ -624,17 +651,17 @@ class ImageProcessor:
                             else:
                                 img_cv = img_np
                         else:
-                            return None, None, "Invalid image format"
+                            return None, None, None, None, "Invalid image format"
 
-                        return img_cv, img_format, exif_data, "Retrieved from Wayback Machine"
+                        return img_cv, img_format, exif_data, raw_bytes, "Retrieved from Wayback Machine"
 
                     except Exception as wb_e:
-                        return None, None, None, f"404 error - Wayback Machine also failed: {str(wb_e)}"
+                        return None, None, None, None, f"404 error - Wayback Machine also failed: {str(wb_e)}"
                 else:
-                    return None, None, None, f"404 error - {wayback_error}"
-            return None, None, None, f"Download failed: {str(e)}"
+                    return None, None, None, None, f"404 error - {wayback_error}"
+            return None, None, None, None, f"Download failed: {str(e)}"
         except Exception as e:
-            return None, None, None, f"Image processing error: {str(e)}"
+            return None, None, None, None, f"Image processing error: {str(e)}"
 
     def find_white_separator(self, image):
         """Find separator by scanning vertical columns and horizontal lines"""
@@ -936,14 +963,16 @@ class ImageProcessor:
                 except Exception as del_e:
                     print(f"Warning: could not delete temp Drive file {file_id}: {del_e}")
 
-    def process_image(self, row_index, image_url):
+    def process_image(self, row_index, image_url, wikimedia_checksums=None):
         """Process a single image - download, split, OCR"""
         result = {
             'image': None,
             'format': 'jpg',
             'exif': None,
             'ocr_text': '',
-            'status': ''
+            'status': '',
+            'checksum': '',
+            'is_duplicate': False
         }
 
         try:
@@ -952,7 +981,7 @@ class ImageProcessor:
                 return result
 
             print(f"Row {row_index}: Downloading image...")
-            image, img_format, exif_data, error = self.download_image(image_url)
+            image, img_format, exif_data, raw_bytes, error = self.download_image(image_url)
             if error:
                 if "404" in error:
                     result['status'] = error
@@ -964,6 +993,19 @@ class ImageProcessor:
 
             result['format'] = img_format
             result['exif'] = exif_data
+
+            # Checksum duplicate check — runs BEFORE OCR/AI (saves quota)
+            if raw_bytes:
+                checksum = compute_checksum(raw_bytes)
+                result['checksum'] = checksum
+                if wikimedia_checksums and checksum in wikimedia_checksums:
+                    print(f"Row {row_index}: Duplicate image detected via checksum — skipping OCR/AI")
+                    result['status'] = 'Duplicate (checksum match)'
+                    result['is_duplicate'] = True
+                    result['image'] = image
+                    return result
+            else:
+                result['checksum'] = ''
 
             print(f"Row {row_index}: Finding separator...")
             separator_row, fallback_used, separator_offset = self.find_white_separator(image)
@@ -1076,7 +1118,9 @@ def translate_text(genai_client, translate_client, text, row_index):
 
     prompt = TRANSLATION_PROMPT.format(text=text.replace('"', "'"))
 
+    last_exception = None
     for model_name in [PRIMARY_MODEL, FALLBACK_MODEL]:
+        backoff = INITIAL_BACKOFF
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 print(f"Row {row_index}: Sending translation request to {model_name}...")
@@ -1117,16 +1161,23 @@ def translate_text(genai_client, translate_client, text, row_index):
                 print(f"Row {row_index}: Translated with {model_name}")
                 return translated, "Success"
 
-
             except Exception as e:
-                print(f"Row {row_index}: {model_name} translation attempt {attempt} failed: {e}")
-                if attempt == MAX_RETRIES:
-                    if model_name == FALLBACK_MODEL:
-                        return "", f"Error:{repr(e)}"
-                    else:
-                        break
+                last_exception = e
+                msg = str(e).lower()
+                is_429 = ("429" in msg) or ("resource exhausted" in msg)
+                is_transient = is_429 or ("timeout" in msg) or ("connection" in msg) or ("temporar" in msg) or ("503" in msg) or ("500" in msg)
 
-    return "", "Error: All models failed"
+                if is_transient and attempt < MAX_RETRIES:
+                    wait = min(backoff, MAX_BACKOFF) + random.uniform(0, backoff * 0.5)
+                    print(f"Row {row_index}: Transient error on {model_name} (attempt {attempt}): {e}, retrying in {wait:.1f}s")
+                    sleep(wait)
+                    backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF)
+                    continue
+                else:
+                    print(f"Row {row_index}: {model_name} translation error (attempt {attempt}): {e}")
+                    break
+
+    return "", f"Error:{repr(last_exception)}"
 
 # ============================================================================
 # TITLE GENERATION FUNCTIONS
@@ -1285,6 +1336,26 @@ def initialize_pywikibot():
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
+def find_available_filename(site, FilePage, target_filename):
+    """Check if filename exists on Commons; if so, append (1), (2), ... until a free slot is found."""
+    if not FilePage(site, f'File:{target_filename}').exists():
+        return target_filename
+
+    dot_index = target_filename.rfind('.')
+    if dot_index == -1:
+        base, ext = target_filename, ''
+    else:
+        base, ext = target_filename[:dot_index], target_filename[dot_index:]
+
+    for n in range(1, 100):
+        candidate = f"{base} ({n}){ext}"
+        if not FilePage(site, f'File:{candidate}').exists():
+            logger.info(f"Filename collision resolved: '{target_filename}' → '{candidate}'")
+            return candidate
+
+    logger.warning(f"Could not resolve filename collision after 99 attempts: {target_filename}")
+    return target_filename
+
 def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description, max_attempts=10):
     """Upload image to Wikimedia Commons"""
 
@@ -1310,14 +1381,13 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
         else:
             img_pil.save(temp_file.name, **save_kwargs)
 
+        # Resolve collision once before the retry loop
+        target_filename = find_available_filename(site, FilePage, target_filename)
+
         # Try uploading with retries
         for attempt in range(max_attempts):
             try:
                 file_page = FilePage(site, f'File:{target_filename}')
-
-                if file_page.exists():
-                    logger.info(f"File already exists: {target_filename}")
-                    return False, 'File already exists'
 
                 logger.info(f"Uploading {target_filename} (attempt {attempt + 1}/{max_attempts})")
 
@@ -1330,7 +1400,7 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
 
                 if success:
                     logger.info(f"Successfully uploaded {target_filename}")
-                    return True, ''
+                    return True, '', target_filename
                 else:
                     logger.warning(f"Upload failed - server response for {target_filename}")
 
@@ -1344,7 +1414,7 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
                 logger.info(f"Waiting 10 seconds before retry...")
                 sleep(10)
 
-        return False, 'Max attempts reached'
+        return False, 'Max attempts reached', target_filename
 
     finally:
         # Clean up temp file
@@ -1527,8 +1597,6 @@ def setup_credentials():
 
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
     os.environ["GOOGLE_CLOUD_PROJECT"] = GOOGLE_CREDENTIALS["project_id"]
-    os.environ["GOOGLE_CLOUD_LOCATION"] = VERTEX_LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
     return creds_path
 
@@ -1566,7 +1634,7 @@ def main():
     print("\n" + "=" * 60)
     print("STEP 1: Scraping data from pressinform.gov.bd")
     print("=" * 60)
-    excel_file = scrape_data()
+    excel_file, wikimedia_checksums = scrape_data()
 
     # Load and setup Google credentials
     print("\nLoading Google credentials...")
@@ -1584,13 +1652,11 @@ def main():
             sys.exit(1)
         print(message)
 
-        genai_client = genai.Client(
-            vertexai=True,
-            project=GOOGLE_CREDENTIALS["project_id"],
-            location=VERTEX_LOCATION
-        )
+        print("Loading Gemini AI Studio key (free secondary account)...")
+        gemini_api_key = load_gemini_api_key()
+        genai_client = genai.Client(api_key=gemini_api_key)
         translate_client = translate.Client()
-        print("Google GenAI and Translate clients initialized")
+        print("Gemini (AI Studio) and Translate clients initialized")
 
         # Initialize Pywikibot
         print("\nInitializing Pywikibot...")
@@ -1642,11 +1708,27 @@ def main():
 
                 # Step 2: Process image (download, split, OCR)
                 print(f"\nSTEP 2: Processing image...")
-                result = image_processor.process_image(idx + 1, image_url)
+                result = image_processor.process_image(idx + 1, image_url, wikimedia_checksums)
 
                 df.iat[idx, 4] = result['ocr_text']  # Column E: OCR text
                 df.iat[idx, 5] = result['status']     # Column F: Status
                 df.to_excel(excel_file, index=False, header=False)
+
+                # Checksum duplicate — image content already on Commons under a different URL
+                if result.get('is_duplicate'):
+                    print(f"Row {idx + 1}: Checksum match — registering URL in module, skipping upload")
+                    dup_checksum = result.get('checksum', '')
+                    dup_entry = f'        ["{image_url}"] = {{date="{date_str}", checksum="{dup_checksum}"}},'
+                    df.iat[idx, 10] = dup_entry
+                    df.iat[idx, 13] = "Skipped (checksum duplicate)"
+                    if update_pid_date_data(site, dup_entry):
+                        df.iat[idx, 11] = "Success (dup)"
+                        success_count += 1
+                    else:
+                        df.iat[idx, 11] = "Failed"
+                        failed_count += 1
+                    df.to_excel(excel_file, index=False, header=False)
+                    continue
 
                 if result['image'] is None or result['status'].startswith('Error') or result['status'].startswith('OCR failed'):
                     print(f"Row {idx + 1}: Image processing failed")
@@ -1690,7 +1772,8 @@ def main():
 
                 # Step 5: Prepare description and data entry
                 print(f"\nSTEP 5: Preparing metadata...")
-                data_entry = f'''        ["{image_url}"] = "{date_str}",'''
+                img_checksum = result.get('checksum', '')
+                data_entry = f'        ["{image_url}"] = {{date="{date_str}", checksum="{img_checksum}"}},'
                 df.iat[idx, 10] = data_entry  # Column K: Data entry
 
                 description = f'''=={{{{int:filedesc}}}}==
@@ -1711,11 +1794,15 @@ def main():
 
                 # Step 6: Upload to Wikimedia Commons
                 print(f"\nSTEP 6: Uploading to Wikimedia Commons...")
-                upload_success, upload_error = upload_to_commons(
+                upload_success, upload_error, actual_title = upload_to_commons(
                     site, FilePage, result['image'], title, img_format, result.get('exif'), description
                 )
 
                 if upload_success:
+                    # Persist the resolved filename if it changed due to a collision
+                    if actual_title != title:
+                        print(f"Row {idx + 1}: Filename adjusted for collision: {actual_title}")
+                        df.iat[idx, 8] = actual_title
                     df.iat[idx, 13] = "Success"  # Column N: Upload status
                     success_count += 1
                     print(f"Row {idx + 1}: Upload successful")
