@@ -5,6 +5,7 @@
 #   - Module:PIDDateData update
 #   - Pre-upload category / module infrastructure check
 
+import json
 import os
 import tempfile
 import traceback
@@ -117,8 +118,7 @@ def batch_update_pid_date_data(site, records):
     """Append multiple entries to User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json on Wikimedia Commons."""
     if not records:
         return True
-        
-    import json
+
     try:
         current_year = datetime.now().year
         page_title = f"User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json"
@@ -178,7 +178,6 @@ def batch_update_pid_date_data(site, records):
 
 def ensure_pid_infrastructure(site):
     """Ensure all required categories and User:PID-Bangladesh-UploadBot/PIDDateData/{year}.json exist for today."""
-    import json
     now = datetime.now()
     year = now.year
     month = now.month
@@ -200,27 +199,25 @@ def ensure_pid_infrastructure(site):
         ),
         (
             f"Category:{month_name} {year} in Bangladesh",
-            "{{{{Monthbyyearbangladesh|{y1}|{y2}|{month}}}}}".format(
-                y1=y1, y2=y2, month=month)
+            f"{{{{Monthbyyearbangladesh|{y1}|{y2}|{month}}}}}"
         ),
         (
             f"Category:{year} in Bangladesh",
-            "{{{{Bangladeshyear|{y1}|{y2}}}}}\n{{{{Countries of Asia|prefix=:Category:{year} in }}}}}}\n{{{{Wikidata Infobox}}}}".format(
-                y1=y1, y2=y2, year=year)
+            f"{{{{Bangladeshyear|{y1}|{y2}}}}}\n"
+            f"{{{{Countries of Asia|prefix=:Category:{year} in }}}}}}\n"
+            f"{{{{Wikidata Infobox}}}}"
         ),
         (
             f"Category:{month_name} {year} in Asia",
-            "{{{{Asiamonthyear|{year}|{month_name}}}}}\n{{{{Wikidata Infobox}}}}".format(
-                year=year, month_name=month_name)
+            f"{{{{Asiamonthyear|{year}|{month_name}}}}}\n{{{{Wikidata Infobox}}}}"
         ),
         (
             f"Category:{month_name} {year} by country",
-            "{{{{Monthbycountryyear|{y1}|{y2}|{month_padded}}}}}\n{{{{Wikidata Infobox}}}}".format(
-                y1=y1, y2=y2, month_padded=month_padded)
+            f"{{{{Monthbycountryyear|{y1}|{y2}|{month_padded}}}}}\n{{{{Wikidata Infobox}}}}"
         ),
         (
             f"Category:{year} photographs of Bangladesh",
-            "{{{{Bangladesh-photoyear|{y1}|{y2}}}}}".format(y1=y1, y2=y2)
+            f"{{{{Bangladesh-photoyear|{y1}|{y2}}}}}"
         ),
         (
             f"Category:PID-BD images from {month_name} {year}",
@@ -250,9 +247,7 @@ def ensure_pid_infrastructure(site):
     try:
         tab_page = pywikibot.Page(site, tab_title)
         if not tab_page.exists():
-            initial_data = []
-            json_str = json.dumps(initial_data, separators=(',', ':'))
-            tab_page.text = json_str
+            tab_page.text = '[]'
             tab_page.save(summary="Creating Data schema for new year", bot=True)
             logger.info(f"Created: {tab_title}")
         else:

@@ -7,8 +7,6 @@ import random
 import re
 from time import sleep
 
-import requests
-
 import config
 from config import logger
 
@@ -57,12 +55,7 @@ def apply_translation_replacements(text, replacements):
 
 def contains_bengali(text):
     """Check if text contains any Bengali characters"""
-    if not text:
-        return False
-    for char in text:
-        if '\u0980' <= char <= '\u09FF':
-            return True
-    return False
+    return bool(text) and re.search(r'[\u0980-\u09FF]', text) is not None
 
 
 # ── Translation ───────────────────────────────────────────────────────────────
@@ -165,15 +158,6 @@ def translate_text(genai_client, vertex_client, translate_client, text, row_inde
 
 # ── Title / filename generation ───────────────────────────────────────────────
 
-def check_internet():
-    """Check if internet is available"""
-    try:
-        requests.get("https://www.google.com", timeout=5)
-        return True
-    except Exception:
-        return False
-
-
 def replace_date_if_needed(title, col_b_date_str):
     """Replace date in title if difference > 7 days from the scraper date"""
     from datetime import datetime
@@ -225,10 +209,6 @@ def generate_title(genai_client, vertex_client, description, date_str, row_index
         backoff = config.INITIAL_BACKOFF
 
         for attempt in range(1, config.MAX_RETRIES + 1):
-            while not check_internet():
-                print(f"Row {row_index}: Waiting for internet connection...")
-                sleep(5)
-
             try:
                 print(f"Row {row_index}: Sending request to {model} via {source_name}...")
 

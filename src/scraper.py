@@ -1,19 +1,21 @@
 # scraper.py
 # Scrapes the PID website (pressinform.gov.bd) and builds the work queue
-# for the image upload pipeline. Outputs an Excel file of new images.
+# for the image upload pipeline. Returns the list of new images to process.
 
+import concurrent.futures
 import hashlib
 import json
-import os
 import re
 import time
 from datetime import datetime
 from urllib.parse import unquote
 
-import requests
 from bs4 import BeautifulSoup
 
 import config
+
+# Retries transport errors and 429/5xx internally.
+session = config.http_session()
 
 
 def normalize_url(url):
@@ -54,7 +56,7 @@ def fetch_wikimedia_data(year):
     for url in urls_to_try:
         try:
             print(f"Trying URL: {url}")
-            response = requests.get(url, headers=headers, timeout=10)
+            response = session.get(url, headers=headers, timeout=10)
             print(f"Status code: {response.status_code}")
 
             if response.status_code == 200:
@@ -124,10 +126,6 @@ def fetch_wikimedia_data(year):
 
 def convert_bengali_date_to_english(bengali_date_text):
     """Convert Bengali date to English yyyy-mm-dd hh:mm:ss format"""
-    # Bengali to English digit mapping
-    bengali_digits = {'০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4',
-                      '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9'}
-
     # Bengali to English month mapping
     bengali_months = {
         'জানুয়ারী': '01', 'জানুয়ারি': '01',
@@ -153,33 +151,21 @@ def convert_bengali_date_to_english(bengali_date_text):
         if not match:
             return ""
 
-        day = match.group(1)
         month_bengali = match.group(2)
-        year = match.group(3)
-        hour = match.group(4)
-        minute = match.group(5)
         am_pm = match.group(6)
 
-        # Convert Bengali digits to English
-        day_en = ''.join(bengali_digits.get(c, c) for c in day)
-        year_en = ''.join(bengali_digits.get(c, c) for c in year)
-        hour_en = ''.join(bengali_digits.get(c, c) for c in hour)
-        minute_en = ''.join(bengali_digits.get(c, c) for c in minute)
+        # int() parses Bengali digits natively — they are Unicode decimal digits
+        day, year, hour, minute = (int(match.group(g)) for g in (1, 3, 4, 5))
 
-        # Convert month
-        month_en = bengali_months.get(month_bengali, '01')
+        month = int(bengali_months.get(month_bengali, '01'))
 
         # Convert to 24-hour format
-        hour_int = int(hour_en)
-        if am_pm == 'PM' and hour_int != 12:
-            hour_int += 12
-        elif am_pm == 'AM' and hour_int == 12:
-            hour_int = 0
+        if am_pm == 'PM' and hour != 12:
+            hour += 12
+        elif am_pm == 'AM' and hour == 12:
+            hour = 0
 
-        # Format as yyyy-mm-dd hh:mm:ss
-        formatted_date = f"{year_en}-{month_en.zfill(2)}-{day_en.zfill(2)} {str(hour_int).zfill(2)}:{minute_en.zfill(2)}:00"
-
-        return formatted_date
+        return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:00"
 
     except Exception as e:
         print(f"Error converting Bengali date: {e}")
@@ -187,49 +173,38 @@ def convert_bengali_date_to_english(bengali_date_text):
 
 
 def fetch_detail_date(detail_href):
-    """Fetch date from a detail page, with retries. Returns date string or empty string."""
+    """Fetch date from a detail page. Returns date string or empty string.
+    Transport errors and 429/5xx are retried inside `session`."""
     detail_url = f"https://pressinform.gov.bd{detail_href}"
-    detail_max_retries = 10
-    for detail_attempt in range(detail_max_retries):
-        try:
-            detail_response = requests.get(
-                detail_url, timeout=10, verify=False)
-            if detail_response.status_code == 200:
-                detail_soup = BeautifulSoup(
-                    detail_response.content, 'html.parser')
-                # Try div.content-update-block first, then any <p> containing Bengali date pattern
-                date_element = detail_soup.find(
-                    'div', class_='content-update-block')
-                if not date_element:
-                    # Fallback: find a <p> tag containing the Bengali date pattern (এ + AM/PM)
-                    for p in detail_soup.find_all('p'):
-                        if 'এ' in p.get_text() and ('AM' in p.get_text() or 'PM' in p.get_text()):
-                            date_element = p
-                            break
-                if date_element:
-                    date_text = date_element.get_text()
-                    print(f"Date text found: {date_text.strip()}")
-                    result = convert_bengali_date_to_english(date_text)
-                    if result:
-                        return result
-                    else:
-                        print(
-                            f"Date conversion failed for text: {date_text.strip()}")
-                        return ""
-                else:
-                    print(f"No date found on detail page: {detail_url}")
-                return ""
-            else:
-                print(
-                    f"Failed to fetch detail page (attempt {detail_attempt + 1}/{detail_max_retries}): {detail_url} - Status {detail_response.status_code}")
-                if detail_attempt < detail_max_retries - 1:
-                    time.sleep(2 ** detail_attempt)
-        except Exception as e:
-            print(
-                f"Error fetching detail page (attempt {detail_attempt + 1}/{detail_max_retries}) {detail_url}: {e}")
-            if detail_attempt < detail_max_retries - 1:
-                time.sleep(2 ** detail_attempt)
-    return ""
+    try:
+        detail_response = session.get(detail_url, timeout=10, verify=False)
+        if detail_response.status_code != 200:
+            print(f"Failed to fetch detail page: {detail_url} - Status {detail_response.status_code}")
+            return ""
+
+        detail_soup = BeautifulSoup(detail_response.content, 'html.parser')
+        # Try div.content-update-block first, then any <p> containing Bengali date pattern
+        date_element = detail_soup.find('div', class_='content-update-block')
+        if not date_element:
+            # Fallback: find a <p> tag containing the Bengali date pattern (এ + AM/PM)
+            for p in detail_soup.find_all('p'):
+                if 'এ' in p.get_text() and ('AM' in p.get_text() or 'PM' in p.get_text()):
+                    date_element = p
+                    break
+        if not date_element:
+            print(f"No date found on detail page: {detail_url}")
+            return ""
+
+        date_text = date_element.get_text()
+        print(f"Date text found: {date_text.strip()}")
+        result = convert_bengali_date_to_english(date_text)
+        if not result:
+            print(f"Date conversion failed for text: {date_text.strip()}")
+        return result
+
+    except Exception as e:
+        print(f"Error fetching detail page {detail_url}: {e}")
+        return ""
 
 
 def scrape_page(page_num, wikimedia_urls, hard_stop_url):
@@ -241,102 +216,82 @@ def scrape_page(page_num, wikimedia_urls, hard_stop_url):
     url = f"https://pressinform.gov.bd/pages/daily-photos?archived=true&page={page_num}&page_size=50"
     print(f"Scraping page {page_num} (50 items)...")
 
-    max_retries = 10
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(url, timeout=10, verify=False)
-            if response.status_code != 200:
-                print(
-                    f"Failed to fetch page {page_num} (status {response.status_code})")
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
+    try:
+        response = session.get(url, timeout=10, verify=False)
+        if response.status_code != 200:
+            print(f"Failed to fetch page {page_num} (status {response.status_code})")
+            return [], False
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        table = soup.find('table', id='noticeTable')
+
+        if not table:
+            print(f"No table found on page {page_num}")
+            return [], False
+
+        results = []
+        hard_stop_hit = False
+        total_images_seen = 0
+        rows = table.find(
+            'tbody', class_='table-tbody').find_all('tr', class_='table-tr')
+
+        for row in rows:
+            # Skip the search input row
+            if 'toggle-hidden' in row.get('class', []):
+                continue
+
+            # Find image TD
+            img_td = row.find('td', {'data-column': 'file'})
+            if not img_td:
+                continue
+
+            # Get ALL img tags in this TD
+            img_tags = img_td.find_all('img')
+            if not img_tags:
+                continue
+
+            detail_link = row.find(
+                'a', href=lambda x: x and '/pages/daily-photos/' in x and x != '#')
+            detail_href = detail_link['href'] if detail_link else None
+
+            # Collect new image URLs for this row, stopping at hard stop
+            for img_tag in img_tags:
+                if not img_tag.get('src'):
                     continue
-                return [], False
+                img_url = img_tag['src']
+                normalized_url = normalize_url(img_url)
+                if hard_stop_url in normalized_url:
+                    print(f"\n{'='*60}")
+                    print("HARD STOP: Reached the specified stopping point")
+                    print(f"Image URL: {img_url}")
+                    print(f"{'='*60}")
+                    hard_stop_hit = True
+                    break  # Do not include this image or any after it in this row
+                total_images_seen += 1
+                # Only keep images not already in Wikimedia
+                if normalized_url not in wikimedia_urls:
+                    results.append((img_url, detail_href))
+                else:
+                    print(f"Skipping (already in Wikimedia): {img_url}")
 
-            soup = BeautifulSoup(response.content, 'html.parser')
-            table = soup.find('table', id='noticeTable')
+            if hard_stop_hit:
+                break  # Stop processing further rows on this page
 
-            if not table:
-                print(f"No table found on page {page_num}")
-                return [], False
-
-            results = []
-            hard_stop_hit = False
-            total_images_seen = 0
-            rows = table.find(
-                'tbody', class_='table-tbody').find_all('tr', class_='table-tr')
-
-            for row in rows:
-                # Skip the search input row
-                if 'toggle-hidden' in row.get('class', []):
-                    continue
-
-                # Find image TD
-                img_td = row.find('td', {'data-column': 'file'})
-                if not img_td:
-                    continue
-
-                # Get ALL img tags in this TD
-                img_tags = img_td.find_all('img')
-                if not img_tags:
-                    continue
-
-                detail_link = row.find(
-                    'a', href=lambda x: x and '/pages/daily-photos/' in x and x != '#')
-                detail_href = detail_link['href'] if detail_link else None
-
-                # Collect new image URLs for this row, stopping at hard stop
-                for img_tag in img_tags:
-                    if not img_tag.get('src'):
-                        continue
-                    img_url = img_tag['src']
-                    normalized_url = normalize_url(img_url)
-                    if hard_stop_url in normalized_url:
-                        print(f"\n{'='*60}")
-                        print("HARD STOP: Reached the specified stopping point")
-                        print(f"Image URL: {img_url}")
-                        print(f"{'='*60}")
-                        hard_stop_hit = True
-                        break  # Do not include this image or any after it in this row
-                    total_images_seen += 1
-                    # Only keep images not already in Wikimedia
-                    if normalized_url not in wikimedia_urls:
-                        results.append((img_url, detail_href))
-                    else:
-                        print(f"Skipping (already in Wikimedia): {img_url}")
-
-                if hard_stop_hit:
-                    break  # Stop processing further rows on this page
-
-            # If page had no images at all (not just all-uploaded), treat as end of content
-            if total_images_seen == 0 and not hard_stop_hit:
-                print(
-                    f"Page {page_num}: no images found at all, end of content")
-                return None, False  # None signals "end of content" vs [] which means "all uploaded"
-
-            return results, hard_stop_hit
-
-        except Exception as e:
-            wait_time = 2 ** attempt
+        # If page had no images at all (not just all-uploaded), treat as end of content
+        if total_images_seen == 0 and not hard_stop_hit:
             print(
-                f"Error scraping page {page_num} (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                print(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                print(f"Failed after {max_retries} attempts")
-                return [], False
+                f"Page {page_num}: no images found at all, end of content")
+            return None, False  # None signals "end of content" vs [] which means "all uploaded"
 
-    return [], False
+        return results, hard_stop_hit
+
+    except Exception as e:
+        print(f"Error scraping page {page_num}: {e}")
+        return [], False
 
 
 def scrape_data():
     """Scrape data from pressinform.gov.bd"""
-    output_dir = os.path.join(config.CREDS_DIR, 'output')
-    os.makedirs(output_dir, exist_ok=True)
-
     current_year = datetime.now().year
     previous_year = current_year - 1
 
@@ -382,8 +337,6 @@ def scrape_data():
         else:
             fully_uploaded_pages = 0
             # Fetch dates only for new images concurrently
-            import concurrent.futures
-            
             def process_item(item):
                 img_url, detail_href = item
                 if detail_href:

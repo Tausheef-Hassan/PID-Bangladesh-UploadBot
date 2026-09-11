@@ -1,10 +1,9 @@
 # Procfile – required by Toolforge Build Service
 # Each line becomes an executable command inside the container.
 #
-# "web" is used by webservices (the health-check endpoint).
-# "run-bot" is the main pipeline job command.
+# "run-bot" is the main pipeline job command, scheduled hourly by
+# toolforge/job.yaml. There is no web process: the bot is a cron job.
 #
 # Note: process type names must NOT collide with real binaries.
 
-web: python main.py --web
 run-bot: python main.py

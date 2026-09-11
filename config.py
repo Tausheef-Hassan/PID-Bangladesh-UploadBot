@@ -8,18 +8,17 @@ import os
 import socket
 import sys
 import warnings
-from functools import wraps
-from time import sleep
 
+import requests
 import urllib3.util.connection as urllib3_cn
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 warnings.filterwarnings('ignore')
 
 # ── UTF-8 stdout/stderr (Windows Bengali support) ─────────────────────────────
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr = open(sys.stderr.fileno(), mode='w', encoding='utf-8', buffering=1)
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -50,18 +49,8 @@ CREDS_DIR = TOOL_DATA_DIR if TOOL_DATA_DIR else SCRIPT_DIR
 
 
 def find_pywikibot_config(filename):
-    """Search for a pywikibot config file in common locations"""
-    search_paths = [
-        # Toolforge Build Service: credentials live in $TOOL_DATA_DIR
-        os.path.join(CREDS_DIR, filename),
-        # Same directory as main.py (local dev)
-        os.path.join(SCRIPT_DIR, filename),
-        os.path.expanduser(f'~/pywikibot/{filename}'),   # ~/pywikibot/
-        os.path.expanduser(f'~/.pywikibot/{filename}'),  # ~/.pywikibot/
-        # Current working directory
-        os.path.join(os.getcwd(), filename),
-    ]
-    for path in search_paths:
+    """Locate a pywikibot config file: $TOOL_DATA_DIR first, then next to main.py."""
+    for path in (os.path.join(CREDS_DIR, filename), os.path.join(SCRIPT_DIR, filename)):
         if os.path.exists(path):
             return path
     return os.path.join(CREDS_DIR, filename)  # Fallback
@@ -83,13 +72,18 @@ GEMINI_CONFIG_PATH = os.path.join(CREDS_DIR, 'gemini.key')   # AI Studio free AP
 IA_KEY_PATH = os.path.join(CREDS_DIR, 'ia.key')              # Internet Archive S3-like keys
 WAYBACK_QUEUE_PATH = os.path.join(CREDS_DIR, 'wayback_pending.json')  # Persistent retry queue
 
+# AI call retries (translator's own backoff ladder)
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
 BACKOFF_MULTIPLIER = 2.0
 MAX_BACKOFF = 60.0
 
+# HTTP retries, applied inside the session returned by http_session()
+HTTP_RETRIES = 10
+# Google API client retries (Drive OCR upload/export/delete)
+API_RETRIES = 5
+
 # ── Mutable shared state (populated at runtime by credentials module) ─────────
-GOOGLE_CREDENTIALS = None            # set by credentials.load_credentials()
 IA_KEYS = {'access': None, 'secret': None}  # set by credentials.load_ia_keys()
 
 # ── Google Drive OCR ──────────────────────────────────────────────────────────
@@ -117,33 +111,22 @@ def compute_checksum(raw_bytes):
     return hashlib.md5(raw_bytes).hexdigest()
 
 
-def retry_on_failure(max_attempts=10, delay=2):
-    """Decorator to retry function on failure"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    result = func(*args, **kwargs)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        data, error = result
-                        if error is None or "Retrieved from Wayback Machine" in str(error):
-                            return result
-                        if attempt < max_attempts - 1:
-                            print(
-                                f"Attempt {attempt + 1} failed, retrying in {delay}s...")
-                            sleep(delay)
-                            continue
-                    return result
-                except Exception as e:
-                    if attempt < max_attempts - 1:
-                        print(
-                            f"Attempt {attempt + 1} failed: {str(e)}, retrying in {delay}s...")
-                        sleep(delay)
-                    else:
-                        if hasattr(func, '__name__') and 'ocr' in func.__name__.lower():
-                            return f"OCR Error: {str(e)}"
-                        return None, f"Error after {max_attempts} attempts: {str(e)}"
-            return result
-        return wrapper
-    return decorator
+def http_session(retries=HTTP_RETRIES, backoff=1.0):
+    """A requests Session that retries transport errors and 429/5xx with
+    exponential backoff + jitter (urllib3 caps each wait at 120 s).
+
+    Only idempotent methods are retried — Retry's default — so a POST such as
+    Save Page Now is never resubmitted behind our back.
+    """
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        backoff_jitter=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        raise_on_status=False,   # hand the final response back to the caller
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    return session

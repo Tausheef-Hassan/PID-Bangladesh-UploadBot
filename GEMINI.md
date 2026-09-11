@@ -16,10 +16,10 @@ The PID Image Processor & Uploader is a Python-based automation tool designed to
 - **Web Interaction:**
     - **BeautifulSoup4 & Requests:** For scraping the PID archive pages.
     - **Pywikibot:** The official framework for interacting with the Wikimedia Commons API.
-- **Data Handling:** 
-    - **Pandas & Openpyxl:** For tracking progress and logging results in Excel format.
-- **Deployment:** 
-    - **Flask:** Provides a health check endpoint for deployment on Wikimedia Toolforge.
+- **Data Handling:**
+    - Plain dicts and `json`: run results are written to a JSON log page on Commons.
+- **Deployment:**
+    - **Toolforge jobs:** `toolforge/job.yaml` runs the bot hourly; no web service is involved.
 
 ## Architecture
 The application operates as a sequential pipeline:
@@ -41,13 +41,12 @@ The application operates as a sequential pipeline:
 ### Prerequisites
 1.  **Python Environment:** Install dependencies (inferred):
     ```bash
-    pip install opencv-python numpy pandas requests Pillow beautifulsoup4 google-cloud-translate google-api-python-client google-auth google-genai openpyxl flask pywikibot
+    pip install -r requirements.txt
     ```
 2.  **Authentication Files:**
     - `user-config.py` & `user-password.py`: Pywikibot credentials. The script looks for these in:
-        1. The same directory as `main.py` (Recommended)
-        2. `~/pywikibot/`
-        3. `~/.pywikibot/`
+        1. `$TOOL_DATA_DIR` (set by the Toolforge Build Service)
+        2. The same directory as `main.py` (local dev)
         4. The current working directory
     - `gemini.key`: Contains `GEMINI_API_KEY=your_key`.
     - `JSON.json`: Google Cloud Service Account key.
@@ -70,4 +69,4 @@ python main.py
 - **Resilience:** The bot uses aggressive retry logic with exponential backoff for all network and AI API calls to handle transient failures.
 - **Duplicate Prevention:** MD5 checksums of raw image bytes are compared against existing Wikimedia records before any AI processing occurs to save on API quota.
 - **IPv4 Enforcement:** Specifically forces IPv4 to avoid common networking issues in certain Kubernetes environments (like Toolforge).
-- **Toolforge Ready:** Contains built-in logic to detect and run as a Toolforge web service or background job.
+- **Toolforge Ready:** Runs as a one-shot background job; Toolforge's scheduler owns the hourly cadence.

@@ -4,7 +4,7 @@
 #
 # Execution order:
 #   0. Boot checks (pywikibot credentials, infrastructure)
-#   1. Scrape pressinform.gov.bd  →  Excel work queue
+#   1. Scrape pressinform.gov.bd  →  work queue
 #   2. For each image:
 #       2a. Archive to Wayback Machine
 #       2b. Download + separator detection + OCR  (image_processor)
@@ -14,13 +14,11 @@
 #       2f. Update Module:PIDDateData  (uploader)
 #   3. Log results to Commons  (commons_log)
 
+import concurrent.futures
 import os
 import sys
-from time import sleep
-import concurrent.futures
+import threading
 
-import pandas as pd
-from flask import Flask
 from google import genai
 from google.cloud import translate_v2 as translate
 
@@ -67,15 +65,16 @@ def main():
         print("Please create user-password.py in the same directory as this script")
         sys.exit(1)
 
-    # ── 0b. Early Pywikibot login + infrastructure ────────────────────────────
-    print("\nInitializing Pywikibot for pre-scrape checks...")
-    _early_result = initialize_pywikibot()
-    if _early_result is None:
+    # ── 0b. Pywikibot login + infrastructure (one login for the whole run) ────
+    print("\nInitializing Pywikibot...")
+    result = initialize_pywikibot()
+    if result is None:
         print("Error: Failed to initialize Pywikibot")
         sys.exit(1)
-    _early_site, _ = _early_result
+    site, FilePage = result
+
     print("\nChecking and creating categories/modules before scraping...")
-    ensure_pid_infrastructure(_early_site)
+    ensure_pid_infrastructure(site)
 
     # ── 0c. Pre-translation replacement table ─────────────────────────────────
     _translation_replacements = load_translation_replacements()
@@ -85,7 +84,6 @@ def main():
     credentials.load_ia_keys()
 
     print("\nChecking Wayback Machine pending queue in background...")
-    import threading
     threading.Thread(target=wayback.retry_wayback_queue, daemon=False).start()
 
     # ── Step 1: Scrape ────────────────────────────────────────────────────────
@@ -123,17 +121,10 @@ def main():
         translate_client = translate.Client()
         print("Gemini (AI Studio primary, Vertex fallback) and Translate clients initialized")
 
-        print("\nInitializing Pywikibot...")
-        result = initialize_pywikibot()
-        if result is None:
-            print("Error: Failed to initialize Pywikibot")
-            sys.exit(1)
-        site, FilePage = result
-
         # ── No new images? ────────────────────────────────────────────────────
         if scraped_data is None:
             print("\nNo new images found. Logging to Commons...")
-            if log_to_commons(site, df=None):
+            if log_to_commons(site):
                 print("Log entry created on Commons.")
             else:
                 print("Warning: Failed to log to Commons.")
@@ -141,19 +132,27 @@ def main():
 
         # ── Load work queue ───────────────────────────────────────────────────
         print(f"\nProcessing {len(scraped_data)} new images in memory...")
-        df = pd.DataFrame(scraped_data)
-        total_rows = len(df)
-        print(f"Total rows to process: {total_rows}")
-
-        while df.shape[1] < 14:
-            df[df.shape[1]] = ""
-
-        df.columns = [
-            "unique_id", "date", "image_url", "detail_url",
-            "ocr_text", "ocr_status", "translation", "translation_status",
-            "filename", "filename_status", "pid_date_data_info", "pid_date_data_status",
-            "wikitext_description", "upload_status"
+        rows = [
+            {
+                "unique_id": unique_id or f"image_{i}",
+                "date": date,
+                "image_url": image_url,
+                "detail_url": detail_url,
+                "ocr_text": "",
+                "ocr_status": "",
+                "translation": "",
+                "translation_status": "",
+                "filename": "",
+                "filename_status": "",
+                "pid_date_data_info": "",
+                "pid_date_data_status": "",
+                "wikitext_description": "",
+                "upload_status": "",
+            }
+            for i, (unique_id, date, image_url, detail_url) in enumerate(scraped_data)
         ]
+        total_rows = len(rows)
+        print(f"Total rows to process: {total_rows}")
 
         success_count = 0
         failed_count = 0
@@ -164,14 +163,13 @@ def main():
         # ── Per-image loop ────────────────────────────────────────────────────
         wayback_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        db_lock = threading.Lock()
+        counter_lock = threading.Lock()
         upload_lock = threading.Lock()
 
         thread_local = threading.local()
 
         def get_image_processor():
             if not hasattr(thread_local, "image_processor"):
-                from src.image_processor import ImageProcessor
                 ip = ImageProcessor()
                 ip.initialize_vision_client()
                 thread_local.image_processor = ip
@@ -179,25 +177,20 @@ def main():
 
         def process_row(idx):
             nonlocal success_count, failed_count
+            row = rows[idx]
             print(f"\n{'='*60}")
             print(f"Processing row {idx + 1}/{total_rows}")
             print(f"{'='*60}")
 
             try:
-                with db_lock:
-                    unique_id = str(df.iat[idx, 0]) if pd.notna(
-                        df.iat[idx, 0]) else f"image_{idx}"
-                    date_str = str(df.iat[idx, 1]) if pd.notna(
-                        df.iat[idx, 1]) else ""
-                    image_url = str(df.iat[idx, 2]) if pd.notna(
-                        df.iat[idx, 2]) else ""
-                    detail_url = str(df.iat[idx, 3]) if pd.notna(
-                        df.iat[idx, 3]) else ""
+                unique_id = row["unique_id"]
+                date_str = row["date"]
+                image_url = row["image_url"]
+                detail_url = row["detail_url"]
 
                 if not image_url or image_url == 'nan':
-                    with db_lock:
-                        print(f"Row {idx + 1}: No URL, skipping")
-                        df.iat[idx, 5] = "No URL"
+                    print(f"Row {idx + 1}: No URL, skipping")
+                    row["ocr_status"] = "No URL"
                     return
 
                 # Step 1.5 — Archive source URLs to Wayback Machine (Async)
@@ -213,9 +206,8 @@ def main():
                 result = local_processor.process_image(
                     idx + 1, image_url, wikimedia_checksums)
 
-                with db_lock:
-                    df.iat[idx, 4] = result['ocr_text']   # Column E: OCR text
-                    df.iat[idx, 5] = result['status']      # Column F: Status
+                row["ocr_text"] = result['ocr_text']
+                row["ocr_status"] = result['status']
 
                 # Checksum duplicate — already on Commons under a different URL
                 if result.get('is_duplicate'):
@@ -226,21 +218,20 @@ def main():
                         pid_updated = update_pid_date_data(
                             site, image_url, date_str, dup_checksum)
 
-                    with db_lock:
-                        df.iat[idx,
-                               10] = f"JSON Tabular: {image_url} | {date_str} | {dup_checksum}"
-                        df.iat[idx, 13] = "Skipped (checksum duplicate)"
+                    row["pid_date_data_info"] = f"JSON Tabular: {image_url} | {date_str} | {dup_checksum}"
+                    row["upload_status"] = "Skipped (checksum duplicate)"
+                    with counter_lock:
                         if pid_updated:
-                            df.iat[idx, 11] = "Success (dup)"
+                            row["pid_date_data_status"] = "Success (dup)"
                             success_count += 1
                         else:
-                            df.iat[idx, 11] = "Failed"
+                            row["pid_date_data_status"] = "Failed"
                             failed_count += 1
                     return
 
                 if result['image'] is None or result['status'].startswith('Error') or result['status'].startswith('OCR failed'):
                     print(f"Row {idx + 1}: Image processing failed")
-                    with db_lock:
+                    with counter_lock:
                         failed_count += 1
                     return
 
@@ -257,13 +248,12 @@ def main():
                     genai_client, vertex_client, translate_client, bengali_text, idx + 1)
                 print(f"Translation Data: {translation}")
 
-                with db_lock:
-                    df.iat[idx, 6] = translation     # Column G
-                    df.iat[idx, 7] = trans_status    # Column H
+                row["translation"] = translation
+                row["translation_status"] = trans_status
 
                 if trans_status != "Success":
                     print(f"Row {idx + 1}: Translation failed")
-                    with db_lock:
+                    with counter_lock:
                         failed_count += 1
                     return
 
@@ -273,26 +263,23 @@ def main():
                     genai_client, vertex_client, translation, date_str, idx + 1, img_format)
                 print(f"Full Title Data (with extension): {title}")
 
-                with db_lock:
-                    df.iat[idx, 8] = title          # Column I
-                    df.iat[idx, 9] = title_status   # Column J
+                row["filename"] = title
+                row["filename_status"] = title_status
 
                 if title_status != "Success":
                     print(f"Row {idx + 1}: Title generation failed")
-                    with db_lock:
+                    with counter_lock:
                         failed_count += 1
                     return
 
                 # Step 5 — Prepare description
                 print(f"\nSTEP 5: Preparing metadata...")
                 img_checksum = result.get('checksum', '')
-                with db_lock:
-                    df.iat[idx,
-                           10] = f"JSON Tabular: {image_url} | {date_str} | {img_checksum}"
+                row["pid_date_data_info"] = f"JSON Tabular: {image_url} | {date_str} | {img_checksum}"
 
                 description = f'''=={{{{int:filedesc}}}}==
 {{{{Information
- |description = {{{{bn|1={bengali_text_raw.strip().lstrip('\ufeff').strip()}}}}}{{{{en|1={translation.strip()}{{{{Auto-translated PID English description}}}}}}}}
+ |description = {{{{bn|1={bengali_text_raw.strip().lstrip('﻿').strip()}}}}}{{{{en|1={translation.strip()}{{{{Auto-translated PID English description}}}}}}}}
  |date = {{{{Date-PID|{date_str}}}}}
  |source = {{{{Source-PID | url={image_url}}}}}
  |author = {{{{Institution:Press Information Department}}}}
@@ -303,8 +290,7 @@ def main():
 {{{{PD-BDGov-PID}}}}
 [[Category: Uploaded with pypan]]'''
 
-                with db_lock:
-                    df.iat[idx, 12] = "'" + description  # Column M
+                row["wikitext_description"] = description
 
                 # Step 6 — Upload
                 print(f"\nSTEP 6: Uploading to Wikimedia Commons...")
@@ -322,25 +308,25 @@ def main():
                     else:
                         pid_updated = False
 
-                with db_lock:
+                with counter_lock:
                     if upload_success:
-                        df.iat[idx, 13] = "Success"   # Column N
+                        row["upload_status"] = "Success"
                         success_count += 1
                         print(f"Row {idx + 1}: Upload successful")
                         successful_pid_updates.append(
                             (image_url, date_str, img_checksum, unique_id, title))
-                        df.iat[idx, 11] = "Success (queued)"
+                        row["pid_date_data_status"] = "Success (queued)"
                     else:
-                        df.iat[idx, 13] = f"Failed: {upload_error}"
+                        row["upload_status"] = f"Failed: {upload_error}"
                         failed_count += 1
                         print(f"Row {idx + 1}: Upload failed - {upload_error}")
                         if "already exists" in str(upload_error).lower():
                             if pid_updated:
-                                df.iat[idx, 11] = "Success (exists)"
+                                row["pid_date_data_status"] = "Success (exists)"
                                 print(
                                     f"Row {idx + 1}: PIDDateData updated (duplicate bypassed)")
                             else:
-                                df.iat[idx, 11] = "Failed (exists)"
+                                row["pid_date_data_status"] = "Failed (exists)"
                                 print(
                                     f"Row {idx + 1}: PIDDateData update failed")
 
@@ -348,9 +334,9 @@ def main():
                 import traceback
                 traceback.print_exc()
                 print(f"Row {idx + 1}: Unhandled exception: {e}")
-                with db_lock:
+                row["upload_status"] = f"Exception: {str(e)}"
+                with counter_lock:
                     failed_count += 1
-                    df.iat[idx, 13] = f"Exception: {str(e)}"
 
         # Run process_row for all rows concurrently (AI is parallel, Uploads are thread-locked)
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -366,7 +352,7 @@ def main():
             batch_update_pid_date_data(site, successful_pid_updates)
 
         print("\nLogging results to Wikimedia Commons...")
-        if log_to_commons(site, df, success_count, failed_count, total_rows):
+        if log_to_commons(site, rows, success_count, failed_count, total_rows):
             print("Successfully logged to Commons.")
 
         print("\n" + "=" * 60)
@@ -388,47 +374,5 @@ def main():
             pass
 
 
-# ── Toolforge entry points ────────────────────────────────────────────────────
-
-def run_as_job():
-    """Entry point for Toolforge background jobs."""
-    main()
-
-
-def _continuous_loop():
-    print("Starting continuous execution mode. Will check for new images every hour.")
-    while True:
-        try:
-            main()
-        except Exception as e:
-            logger.error(f"Critical error in main execution: {e}")
-            print(f"Critical error in main execution: {e}")
-
-        print("\n" + "=" * 60)
-        print("Run completed. Sleeping for 1 hour (3600 seconds) before next check...")
-        print("=" * 60)
-        sleep(3600)
-
-
 if __name__ == "__main__":
-    if "--web" in sys.argv or os.environ.get('TOOLFORGE_WEBSERVICE'):
-        import threading
-
-        # Start the scraper loop in a background thread so the web server can run
-        scraper_thread = threading.Thread(target=_continuous_loop, daemon=True)
-        scraper_thread.start()
-
-        app = Flask(__name__)
-
-        @app.route('/')
-        def home():
-            return "PID Image Processor is running continuously in the background. Check logs for updates."
-
-        @app.route('/health')
-        def health():
-            return {'status': 'healthy', 'scraper_thread_alive': scraper_thread.is_alive()}
-
-        port = int(os.environ.get("PORT", 8000))
-        app.run(host='0.0.0.0', port=port)
-    else:
-        main()
+    main()

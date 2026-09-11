@@ -53,6 +53,16 @@ def load_ia_keys():
         print(f"Warning: ia.key found but IA_ACCESS_KEY/IA_SECRET_KEY missing — check file format.")
 
 
+def _validate(creds, source):
+    """Exit unless the credential dict carries every field Google needs."""
+    missing = [f for f in ("type", "project_id", "private_key", "client_email")
+               if f not in creds]
+    if missing:
+        print(f"ERROR: Credentials from {source} missing required fields: {', '.join(missing)}")
+        sys.exit(1)
+    print(f"Credentials loaded from {source}")
+
+
 def load_credentials():
     """Load Google Cloud credentials from environment variable or JSON file"""
     global _google_credentials
@@ -62,15 +72,7 @@ def load_credentials():
     if creds_json:
         try:
             _google_credentials = json.loads(creds_json)
-
-            required_fields = ["type", "project_id", "private_key", "client_email"]
-            missing_fields = [f for f in required_fields if f not in _google_credentials]
-
-            if missing_fields:
-                print(f"ERROR: Credential missing required fields: {', '.join(missing_fields)}")
-                sys.exit(1)
-
-            print("Credentials loaded from environment variable")
+            _validate(_google_credentials, "environment variable")
             return True
         except json.JSONDecodeError as e:
             print(f"ERROR: Invalid JSON in environment variable: {e}")
@@ -86,19 +88,12 @@ def load_credentials():
     try:
         with open(creds_file, 'r') as f:
             _google_credentials = json.load(f)
-
-        required_fields = ["type", "project_id", "private_key", "client_email"]
-        missing_fields = [f for f in required_fields if f not in _google_credentials]
-
-        if missing_fields:
-            print(f"ERROR: Credential file missing required fields: {', '.join(missing_fields)}")
-            sys.exit(1)
-
-        print("Credentials loaded from file")
-        return True
     except (OSError, json.JSONDecodeError) as e:
         print(f"ERROR: Failed to load credentials from file: {e}")
         sys.exit(1)
+
+    _validate(_google_credentials, "file")
+    return True
 
 
 def setup_credentials():
@@ -111,30 +106,3 @@ def setup_credentials():
     os.environ["GOOGLE_CLOUD_PROJECT"] = _google_credentials["project_id"]
 
     return creds_path
-
-
-# ── Future Backup APIs (Boilerplate Template) ──────────────────────────────────
-# Add new API keys here when you want to expand fallback models in the future.
-
-def load_openai_api_key():
-    """Boilerplate template: Load OpenAI API key for backup fallback."""
-    key_path = os.path.join(config.CREDS_DIR, 'openai.key')
-    if not os.path.exists(key_path):
-        return None
-    with open(key_path, 'r') as f:
-        for line in f:
-            if line.startswith('OPENAI_API_KEY='):
-                return line.split('=', 1)[1].strip()
-    return None
-
-
-def load_anthropic_api_key():
-    """Boilerplate template: Load Anthropic API key for backup fallback."""
-    key_path = os.path.join(config.CREDS_DIR, 'anthropic.key')
-    if not os.path.exists(key_path):
-        return None
-    with open(key_path, 'r') as f:
-        for line in f:
-            if line.startswith('ANTHROPIC_API_KEY='):
-                return line.split('=', 1)[1].strip()
-    return None

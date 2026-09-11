@@ -11,24 +11,13 @@ import logging
 import os
 import time
 import threading
-import socket
 
-import requests
-import urllib3.util.connection as urllib3_cn
 from urllib.parse import quote
 
-import config
-from config import retry_on_failure
+import config  # also installs the IPv4-only patch on import
 
-# ── Force IPv4 ────────────────────────────────────────────────────────────────
-def allowed_gai_family():
-    """Force IPv4 to bypass broken K8s/Toolforge IPv6 routing."""
-    return socket.AF_INET
-
-urllib3_cn.allowed_gai_family = allowed_gai_family
-# ──────────────────────────────────────────────────────────────────────────────
-
-session = requests.Session()
+# Retries transport errors and 429/5xx internally; POSTs are never resubmitted.
+session = config.http_session()
 session.trust_env = False  # Do not pick up HTTP_PROXY / HTTPS_PROXY env vars; connect directly
 CONNECT_TIMEOUT = 8   # seconds
 
@@ -102,9 +91,9 @@ def _dequeue_wayback(url):
 
 # ── Core Wayback operations ───────────────────────────────────────────────────
 
-@retry_on_failure(max_attempts=10, delay=2)
 def get_wayback_url(url):
-    """Get the oldest archived version from Wayback Machine (used for 404 fallback)"""
+    """Get the oldest archived version from Wayback Machine (used for 404 fallback).
+    Transport errors and 429/5xx are retried inside `session`."""
     try:
         encoded_url = quote(url, safe='')
         api_url = f"http://archive.org/wayback/available?url={encoded_url}"
