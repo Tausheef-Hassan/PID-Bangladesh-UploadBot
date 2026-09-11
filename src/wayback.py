@@ -21,6 +21,10 @@ session = config.http_session()
 session.trust_env = False  # Do not pick up HTTP_PROXY / HTTPS_PROXY env vars; connect directly
 CONNECT_TIMEOUT = 8   # seconds
 
+# Wall-clock cap on the queue-confirmation pass. The pool thread running it is
+# non-daemon, so without a cap a long queue holds the hourly job open.
+RETRY_BUDGET = 600    # seconds
+
 _queue_lock = threading.Lock()
 
 # ── Dedicated Wayback log ─────────────────────────────────────────────────────
@@ -132,9 +136,25 @@ def get_wayback_url(url):
         return None, f"Wayback Machine error: {str(e)}"
 
 
-def archive_to_wayback(url, _enqueue_on_fail=True):
+def is_archived(url):
+    """Cheap check: does Wayback already hold a snapshot of this URL?"""
+    try:
+        r = session.get(f'https://archive.org/wayback/available?url={quote(url, safe="")}',
+                        timeout=(CONNECT_TIMEOUT, 15))
+        return bool(r.json().get('archived_snapshots', {}).get('closest'))
+    except Exception as e:
+        _wblog('debug', f"[Archived?] check failed for {url}: {repr(e)}")
+        return False
+
+
+def archive_to_wayback(url, _enqueue_on_fail=True, confirm=True):
     """Submit URL to the Save Page Now v2 API for Wayback Machine archiving.
     Outputs raw status codes and payloads on all failure scenarios.
+
+    confirm=False submits the job and returns immediately without waiting for
+    the capture to land. The URL goes onto the persistent queue and the next
+    run confirms it. Polling costs up to 90 s per URL, which on the hot path
+    keeps the hourly job alive long after its work is done.
     """
     _wblog('info', f"Archiving to Wayback Machine: {url}")
     success = False
@@ -159,35 +179,40 @@ def archive_to_wayback(url, _enqueue_on_fail=True):
 
             if response.status_code == 200 and resp_json.get('job_id'):
                 job_id = resp_json['job_id']
-                _wblog('info', f"SPN2 job submitted: {job_id} — polling for result...")
-                
-                timed_out = True
-                for _ in range(18):
-                    time.sleep(5)
-                    try:
-                        status_r = session.get(
-                            f'https://web.archive.org/save/status/{job_id}',
-                            headers=headers, timeout=(CONNECT_TIMEOUT, 30))
-                        status = status_r.json()
-                    except Exception as poll_err:
-                        _wblog('debug', f"[SPN2 Polling] Raw tracking exception: {repr(poll_err)}")
-                        continue
-                        
-                    s = status.get('status', '')
-                    if s == 'success':
-                        archived = 'https://web.archive.org/web/' + status.get('timestamp', '') + '/' + url
-                        _wblog('info', f"[SPN2] SUCCESS — Archived: {archived}")
-                        _dequeue_wayback(url)
-                        success = True
-                        timed_out = False
-                        break
-                    elif s == 'error':
-                        _wblog('error', f"[SPN2] RAW JOB ERROR JSON: {status}")
-                        timed_out = False
-                        break
-                        
-                if timed_out:
-                    _wblog('error', f"[SPN2] FAIL — Job timed out (>90 s) for: {url}")
+
+                if not confirm:
+                    # Leave success False so the URL lands on the queue below.
+                    _wblog('info', f"SPN2 job submitted: {job_id} — queued for confirmation next run")
+                else:
+                    _wblog('info', f"SPN2 job submitted: {job_id} — polling for result...")
+
+                    timed_out = True
+                    for _ in range(18):
+                        time.sleep(5)
+                        try:
+                            status_r = session.get(
+                                f'https://web.archive.org/save/status/{job_id}',
+                                headers=headers, timeout=(CONNECT_TIMEOUT, 30))
+                            status = status_r.json()
+                        except Exception as poll_err:
+                            _wblog('debug', f"[SPN2 Polling] Raw tracking exception: {repr(poll_err)}")
+                            continue
+
+                        s = status.get('status', '')
+                        if s == 'success':
+                            archived = 'https://web.archive.org/web/' + status.get('timestamp', '') + '/' + url
+                            _wblog('info', f"[SPN2] SUCCESS — Archived: {archived}")
+                            _dequeue_wayback(url)
+                            success = True
+                            timed_out = False
+                            break
+                        elif s == 'error':
+                            _wblog('error', f"[SPN2] RAW JOB ERROR JSON: {status}")
+                            timed_out = False
+                            break
+
+                    if timed_out:
+                        _wblog('error', f"[SPN2] FAIL — Job timed out (>90 s) for: {url}")
             elif resp_json.get('status_ext') == 'error:too-many-daily-captures':
                 _wblog('info', f"[SPN2] SUCCESS — Already captured today: {url}")
                 _dequeue_wayback(url)
@@ -201,20 +226,24 @@ def archive_to_wayback(url, _enqueue_on_fail=True):
                 f'https://web.archive.org/save/{url}',
                 headers={'User-Agent': 'PID-Bangladesh-UploadBot/2.0'},
                 timeout=(CONNECT_TIMEOUT, 60), allow_redirects=True)
-            
-            time.sleep(5)
-            check = session.get(
-                f'https://archive.org/wayback/available?url={url}',
-                timeout=(CONNECT_TIMEOUT, 15))
-            
-            snapshots = check.json().get('archived_snapshots', {})
-            if snapshots:
-                confirmed_url = snapshots.get('closest', {}).get('url', '')
-                _wblog('info', f"[Unauth] SUCCESS — Confirmed archived: {confirmed_url}")
-                _dequeue_wayback(url)
-                success = True
+
+            if not confirm:
+                # Leave success False so the URL lands on the queue below.
+                _wblog('info', f"[Unauth] Save requested — queued for confirmation next run: {url}")
             else:
-                _wblog('error', f"[Unauth] RAW FAIL — Save Status: {fallback_resp.status_code} | Check Status: {check.status_code} | Check Body: {check.text}")
+                time.sleep(5)
+                check = session.get(
+                    f'https://archive.org/wayback/available?url={url}',
+                    timeout=(CONNECT_TIMEOUT, 15))
+
+                snapshots = check.json().get('archived_snapshots', {})
+                if snapshots:
+                    confirmed_url = snapshots.get('closest', {}).get('url', '')
+                    _wblog('info', f"[Unauth] SUCCESS — Confirmed archived: {confirmed_url}")
+                    _dequeue_wayback(url)
+                    success = True
+                else:
+                    _wblog('error', f"[Unauth] RAW FAIL — Save Status: {fallback_resp.status_code} | Check Status: {check.status_code} | Check Body: {check.text}")
                 
     except Exception as e:
         _wblog('error', f"[Archive] RAW SYSTEM EXCEPTION for {url}: {repr(e)}")
@@ -225,35 +254,50 @@ def archive_to_wayback(url, _enqueue_on_fail=True):
     return success
 
 
-def retry_wayback_queue():
-    """Sequentially loop through pending URLs with a strict 15-second delay.
-    Exposes raw underlying infrastructure errors.
+def retry_wayback_queue(budget_seconds=RETRY_BUDGET):
+    """Confirm or re-submit pending URLs, within a wall-clock budget.
+
+    Most entries were submitted by the previous run and have landed by now, so
+    they cost one cheap availability check. Whatever the budget does not reach
+    stays queued for the next run — that is what the persistent queue is for.
     """
     queue = _load_wayback_queue()
     if not queue:
         _wblog('info', "Wayback queue is empty — nothing to retry.")
         return
-        
-    _wblog('info', f"\nRetrying {len(queue)} pending archive(s) sequentially with a 15-second delay limit...")
+
+    _wblog('info', f"\nConfirming {len(queue)} pending archive(s) (budget: {budget_seconds}s)...")
+    deadline = time.monotonic() + budget_seconds
     still_pending = []
+    confirmed = 0
 
     for idx, url in enumerate(queue, 1):
+        if time.monotonic() >= deadline:
+            _wblog('info', f"  Budget spent — leaving {len(queue) - idx + 1} URL(s) queued for next run.")
+            still_pending.extend(queue[idx - 1:])
+            break
+
         _wblog('info', f"Processing item [{idx}/{len(queue)}]: {url}")
         try:
-            # Execute archiving directly (unblocked framework execution)
-            success = archive_to_wayback(url, _enqueue_on_fail=False)
-            if success:
+            if is_archived(url):
+                _wblog('info', f"  Already archived: {url}")
+                confirmed += 1
+                continue   # no SPN2 call, no sleep — this is the common case
+
+            if archive_to_wayback(url, _enqueue_on_fail=False):
                 _wblog('info', f"  Retry successful: {url}")
+                confirmed += 1
             else:
                 still_pending.append(url)
         except Exception as exc:
             _wblog('error', f"  [Loop Engine] RAW EXCEPTION for {url}: {repr(exc)}")
             still_pending.append(url)
+            continue
 
-        # Enforce 15-second intervals between queue requests
+        # Space out actual SPN2 submissions; confirmations above skip this.
         if idx < len(queue):
             _wblog('info', "  Sleeping 15 seconds before launching next request...")
             time.sleep(15)
 
     _save_wayback_queue(still_pending)
-    _wblog('info', f"Wayback retry cycle finished. {len(queue) - len(still_pending)} succeeded, {len(still_pending)} remains in file.")
+    _wblog('info', f"Wayback retry cycle finished. {confirmed} confirmed, {len(still_pending)} remains in file.")

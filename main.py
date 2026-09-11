@@ -123,11 +123,7 @@ def main():
 
         # ── No new images? ────────────────────────────────────────────────────
         if scraped_data is None:
-            print("\nNo new images found. Logging to Commons...")
-            if log_to_commons(site):
-                print("Log entry created on Commons.")
-            else:
-                print("Warning: Failed to log to Commons.")
+            print("\nNo new images found. Nothing to log.")
             return
 
         # ── Load work queue ───────────────────────────────────────────────────
@@ -195,10 +191,13 @@ def main():
 
                 # Step 1.5 — Archive source URLs to Wayback Machine (Async)
                 print(f"\nSTEP 1.5: Archiving to Wayback Machine (Async)...")
-                wayback_executor.submit(wayback.archive_to_wayback, image_url)
+                # confirm=False: submit and move on. The queue-confirmation pass
+                # at the start of the next run checks whether the capture landed.
+                wayback_executor.submit(
+                    wayback.archive_to_wayback, image_url, confirm=False)
                 if detail_url:
                     wayback_executor.submit(
-                        wayback.archive_to_wayback, detail_url)
+                        wayback.archive_to_wayback, detail_url, confirm=False)
 
                 # Step 2 — Download + OCR
                 print(f"\nSTEP 2: Processing image...")
