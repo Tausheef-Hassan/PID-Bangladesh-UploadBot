@@ -10,14 +10,25 @@ import pywikibot
 from config import logger
 
 
+# Rebuilt from the other fields at upload time, and by far the heaviest key —
+# keeping it in the log is what pushes the page towards $wgMaxArticleSize.
+_SKIP_FIELDS = ("wikitext_description",)
+
+
 def log_to_commons(site, rows=None, success_count=0, failed_count=0, total_rows=0):
-    """Append processing results to the bot's monthly JSON log page on Wikimedia Commons."""
+    """Append processing results to the bot's daily JSON log page on Wikimedia Commons.
+
+    One page per day, not per month: every run rewrites the whole page, and a
+    month of hourly runs overruns the 2 MB page limit — after which each save
+    fails and the log silently stops updating.
+    """
+    if not rows and not total_rows:
+        logger.info("Nothing to log to Commons this run.")
+        return True
+
     try:
         current_date = datetime.now()
-        month_name = current_date.strftime("%B")   # e.g. "June"
-        year = current_date.strftime("%Y")
-
-        page_title = f"User:PID-Bangladesh-UploadBot/Log/{month_name}_{year}.json"
+        page_title = f"User:PID-Bangladesh-UploadBot/Log/{current_date.strftime('%Y-%m-%d')}.json"
 
         page = pywikibot.Page(site, page_title)
 
@@ -26,7 +37,10 @@ def log_to_commons(site, rows=None, success_count=0, failed_count=0, total_rows=
             "total_processed": total_rows,
             "success_count": success_count,
             "failed_count": failed_count,
-            "items": rows or [],
+            "items": [
+                {k: v for k, v in row.items() if k not in _SKIP_FIELDS}
+                for row in (rows or [])
+            ],
         }
 
         existing_data = []
