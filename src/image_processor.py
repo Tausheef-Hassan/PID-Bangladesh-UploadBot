@@ -11,7 +11,6 @@ from io import BytesIO
 
 import cv2
 import numpy as np
-import requests
 from PIL import Image, ImageFile, ImageOps
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
@@ -20,12 +19,14 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 import config
 from src import wayback
-from config import compute_checksum, retry_on_failure
+from config import compute_checksum
 
 
 class ImageProcessor:
     def __init__(self):
         self._drive_service = None
+        # One session per instance; main.py builds one ImageProcessor per worker thread.
+        self._session = config.http_session()
 
     def cleanup_temp_drive_files(self):
         """Find and delete any leftover ocr_temp.png files in Google Drive."""
@@ -36,13 +37,14 @@ class ImageProcessor:
                 q="name='ocr_temp.png'",
                 spaces='drive',
                 fields='files(id, name)'
-            ).execute()
+            ).execute(num_retries=config.API_RETRIES)
             items = results.get('files', [])
             if items:
                 print(f"Found {len(items)} orphaned temporary Drive files. Cleaning up...")
                 for item in items:
                     try:
-                        self._drive_service.files().delete(fileId=item['id']).execute()
+                        self._drive_service.files().delete(
+                            fileId=item['id']).execute(num_retries=config.API_RETRIES)
                     except Exception as e:
                         print(f"Failed to clean up {item['id']}: {e}")
         except Exception as e:
@@ -70,113 +72,62 @@ class ImageProcessor:
         except Exception as e:
             return False, f"Failed to initialize Drive OCR: {str(e)}"
 
+    def _fetch_and_decode(self, url):
+        """Download one URL and decode it to (OpenCV BGR image, format, exif, raw bytes)."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = self._session.get(url, headers=headers, timeout=30, verify=False)
+        response.raise_for_status()
+
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+        raw_bytes = response.content
+        img_pil = Image.open(BytesIO(raw_bytes))
+
+        # Store EXIF data before any processing
+        exif_data = img_pil.info.get('exif', None)
+        img_pil = ImageOps.exif_transpose(img_pil)
+
+        # Detect image format before the mode conversion drops it
+        img_format = img_pil.format.lower() if img_pil.format else 'jpg'
+        if img_format == 'jpeg':
+            img_format = 'jpg'
+
+        # Anything exotic (CMYK, P, LA, ...) becomes RGB
+        if img_pil.mode not in ('RGB', 'L', 'RGBA'):
+            img_pil = img_pil.convert('RGB')
+
+        img_np = np.array(img_pil)
+
+        # Convert to OpenCV BGR format
+        if img_np.ndim == 2:
+            img_cv = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)   # Grayscale
+        elif img_np.ndim == 3 and img_np.shape[2] == 4:
+            img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+        elif img_np.ndim == 3 and img_np.shape[2] == 3:
+            img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        else:
+            raise ValueError("Invalid image format")
+
+        return img_cv, img_format, exif_data, raw_bytes
+
     def download_image(self, url):
         """Download image from URL and return image with its extension.
         Falls back to Wayback Machine on 404.
         """
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(
-                url, headers=headers, timeout=30, verify=False)
-            response.raise_for_status()
-
-            ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-            raw_bytes = response.content
-            img_pil = Image.open(BytesIO(raw_bytes))
-
-            # Store EXIF data before any processing
-            exif_data = img_pil.info.get('exif', None)
-            img_pil = ImageOps.exif_transpose(img_pil)
-
-            # Convert CMYK to RGB if needed
-            if img_pil.mode == 'CMYK':
-                img_pil = img_pil.convert('RGB')
-            elif img_pil.mode not in ('RGB', 'L', 'RGBA'):
-                # Convert any other color mode to RGB
-                img_pil = img_pil.convert('RGB')
-
-            # Detect image format
-            img_format = img_pil.format.lower() if img_pil.format else 'jpg'
-            if img_format == 'jpeg':
-                img_format = 'jpg'
-
-            # Convert PIL to numpy array
-            img_np = np.array(img_pil)
-
-            # Convert to OpenCV BGR format
-            if len(img_np.shape) == 2:
-                # Grayscale
-                img_cv = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
-            elif len(img_np.shape) == 3:
-                if img_np.shape[2] == 4:
-                    # RGBA
-                    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
-                elif img_np.shape[2] == 3:
-                    # RGB — convert to BGR for OpenCV
-                    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                else:
-                    img_cv = img_np
-            else:
-                return None, None, None, None, "Invalid image format"
-
-            return img_cv, img_format, exif_data, raw_bytes, None
+            return self._fetch_and_decode(url) + (None,)
 
         except requests.exceptions.RequestException as e:
             if "404" in str(e) or (hasattr(e, 'response') and e.response is not None and e.response.status_code == 404):
                 wayback_url, wayback_error = wayback.get_wayback_url(url)
-                if wayback_url:
-                    try:
-                        headers = {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                        }
-                        response = requests.get(
-                            wayback_url, headers=headers, timeout=30, verify=False)
-                        response.raise_for_status()
-
-                        ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-                        raw_bytes = response.content
-                        img_pil = Image.open(BytesIO(raw_bytes))
-
-                        # Store EXIF data before any processing
-                        exif_data = img_pil.info.get('exif', None)
-                        img_pil = ImageOps.exif_transpose(img_pil)
-                        # Convert CMYK to RGB if needed
-                        if img_pil.mode == 'CMYK':
-                            img_pil = img_pil.convert('RGB')
-                        elif img_pil.mode not in ('RGB', 'L', 'RGBA'):
-                            img_pil = img_pil.convert('RGB')
-
-                        # Detect image format
-                        img_format = img_pil.format.lower() if img_pil.format else 'jpg'
-                        if img_format == 'jpeg':
-                            img_format = 'jpg'
-
-                        img_np = np.array(img_pil)
-
-                        if len(img_np.shape) == 2:
-                            img_cv = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
-                        elif len(img_np.shape) == 3:
-                            if img_np.shape[2] == 4:
-                                img_cv = cv2.cvtColor(
-                                    img_np, cv2.COLOR_RGBA2BGR)
-                            elif img_np.shape[2] == 3:
-                                img_cv = cv2.cvtColor(
-                                    img_np, cv2.COLOR_RGB2BGR)
-                            else:
-                                img_cv = img_np
-                        else:
-                            return None, None, None, None, "Invalid image format"
-
-                        return img_cv, img_format, exif_data, raw_bytes, "Retrieved from Wayback Machine"
-
-                    except Exception as wb_e:
-                        return None, None, None, None, f"404 error - Wayback Machine also failed: {str(wb_e)}"
-                else:
+                if not wayback_url:
                     return None, None, None, None, f"404 error - {wayback_error}"
+                try:
+                    return self._fetch_and_decode(wayback_url) + ("Retrieved from Wayback Machine",)
+                except Exception as wb_e:
+                    return None, None, None, None, f"404 error - Wayback Machine also failed: {str(wb_e)}"
             return None, None, None, None, f"Download failed: {str(e)}"
         except Exception as e:
             return None, None, None, None, f"Image processing error: {str(e)}"
@@ -191,7 +142,6 @@ class ImageProcessor:
         all_columns = first_columns + last_columns
 
         column_heights = {}
-        column_colors = {}
 
         for col in all_columns:
             column_height = -1
@@ -213,18 +163,14 @@ class ImageProcessor:
                         color_samples.append(pixel)
                         column_height = y
                     else:
-                        if len(color_samples) > 0:
-                            column_heights[col] = height - 1 - y
-                            column_colors[col] = np.mean(color_samples, axis=0)
+                        column_heights[col] = height - 1 - y
                         break
 
             if column_height != -1 and col not in column_heights:
                 column_heights[col] = height - 1 - start_row
-                if len(color_samples) > 0:
-                    column_colors[col] = np.mean(color_samples, axis=0)
 
         if not column_heights:
-            return -1, False
+            return -1, False, 2
 
         min_uniform_top = height
         for col, col_height in column_heights.items():
@@ -257,16 +203,10 @@ class ImageProcessor:
                             if matching_percentage >= 0.98:
                                 valid_lines.append(scan_row)
 
-        if valid_lines:
-            cutoff_row = min(valid_lines)
-        elif column_heights:
-            cutoff_row = min_uniform_top
-        else:
-            return -1, False
+        # column_heights is non-empty here (checked above), so min_uniform_top is set
+        cutoff_row = min(valid_lines) if valid_lines else min_uniform_top
 
-        offset = round(2 + 3/math.log(3100/670) * math.log(height/670))
-        if offset < 2:
-            offset = 2
+        offset = max(2, round(2 + 3 / math.log(3100 / 670) * math.log(height / 670)))
 
         separator_row = cutoff_row - offset
 
@@ -284,9 +224,19 @@ class ImageProcessor:
 
         return separator_row, False, offset
 
+    @staticmethod
+    def _background_fraction(strip):
+        """Fraction of a row/column whose pixels are page background (white or #fbf9fa)."""
+        strip = strip.astype(np.float32)
+        tolerance = 255 * 0.02
+        matching = np.zeros(len(strip), dtype=bool)
+        for bg_color in ((255, 255, 255), (250, 249, 251)):
+            matching |= np.all(np.abs(strip - bg_color) <= tolerance, axis=1)
+        return np.sum(matching) / len(strip)
+
     def find_separator_fallback(self, image, start_row):
         """Fallback method to find separator"""
-        height, width = image.shape[:2]
+        height = image.shape[0]
 
         fallback_consecutive_similar_lines = 0
         fallback_separator_row = -1
@@ -295,33 +245,12 @@ class ImageProcessor:
         if fallback_required_lines <= 1:
             fallback_required_lines = 2
 
-        white_color = np.array([255, 255, 255], dtype=np.uint8)
-        fbf9fa_color = np.array([250, 249, 251], dtype=np.uint8)
-        color_tolerance = 255 * 0.02
-
         for y_fallback in range(start_row, height):
-            row_fallback = image[y_fallback]
-
-            white_diff = np.abs(row_fallback.astype(np.float32) - white_color.astype(np.float32))
-            white_matching = np.all(white_diff <= color_tolerance, axis=1)
-
-            fbf9fa_diff = np.abs(row_fallback.astype(np.float32) - fbf9fa_color.astype(np.float32))
-            fbf9fa_matching = np.all(fbf9fa_diff <= color_tolerance, axis=1)
-
-            matching_pixels = white_matching | fbf9fa_matching
-            matching_percentage = np.sum(matching_pixels) / width
-
-            if matching_percentage >= 0.98:
+            if self._background_fraction(image[y_fallback]) >= 0.98:
                 fallback_consecutive_similar_lines += 1
                 if fallback_consecutive_similar_lines >= fallback_required_lines:
-                    if fallback_consecutive_similar_lines >= 10:
-                        fallback_separator_row_y_offset = fallback_consecutive_similar_lines + 5
-                    elif fallback_consecutive_similar_lines in (1, 2, 3):
-                        fallback_separator_row_y_offset = 2
-                    else:
-                        fallback_separator_row_y_offset = fallback_consecutive_similar_lines + 5
-
-                    fallback_separator_row = y_fallback - fallback_separator_row_y_offset
+                    n = fallback_consecutive_similar_lines
+                    fallback_separator_row = y_fallback - (2 if n <= 3 else n + 5)
                     break
             else:
                 fallback_consecutive_similar_lines = 0
@@ -332,45 +261,17 @@ class ImageProcessor:
         """Crop white or fbf9fa colored sections from left and right sides"""
         height, width = image.shape[:2]
 
-        white_color = np.array([255, 255, 255], dtype=np.uint8)
-        fbf9fa_color = np.array([250, 249, 251], dtype=np.uint8)
-        color_tolerance = 255 * 0.02
-
         left_crop = 0
         for x in range(width):
-            column = image[:, x]
-
-            white_diff = np.abs(column.astype(np.float32) - white_color.astype(np.float32))
-            white_matching = np.all(white_diff <= color_tolerance, axis=1)
-
-            fbf9fa_diff = np.abs(column.astype(np.float32) - fbf9fa_color.astype(np.float32))
-            fbf9fa_matching = np.all(fbf9fa_diff <= color_tolerance, axis=1)
-
-            matching_pixels = white_matching | fbf9fa_matching
-            matching_percentage = np.sum(matching_pixels) / height
-
-            if matching_percentage >= 0.98:
-                left_crop = x + 1
-            else:
+            if self._background_fraction(image[:, x]) < 0.98:
                 break
+            left_crop = x + 1
 
         right_crop = width
-        for x in range(width-1, -1, -1):
-            column = image[:, x]
-
-            white_diff = np.abs(column.astype(np.float32) - white_color.astype(np.float32))
-            white_matching = np.all(white_diff <= color_tolerance, axis=1)
-
-            fbf9fa_diff = np.abs(column.astype(np.float32) - fbf9fa_color.astype(np.float32))
-            fbf9fa_matching = np.all(fbf9fa_diff <= color_tolerance, axis=1)
-
-            matching_pixels = white_matching | fbf9fa_matching
-            matching_percentage = np.sum(matching_pixels) / height
-
-            if matching_percentage >= 0.98:
-                right_crop = x
-            else:
+        for x in range(width - 1, -1, -1):
+            if self._background_fraction(image[:, x]) < 0.98:
                 break
+            right_crop = x
 
         expansion = int(round((4 / math.log(3100 / 670)) * math.log(height / 670) + 5))
         left_expanded = max(0, left_crop - expansion)
@@ -416,7 +317,6 @@ class ImageProcessor:
 
         return text
 
-    @retry_on_failure(max_attempts=10, delay=2)
     def perform_ocr(self, image):
         """Perform OCR using Google Drive API (free, replaces Vision API)"""
         file_id = None
@@ -444,7 +344,7 @@ class ImageProcessor:
                 media_body=media,
                 ocrLanguage='bn',   # Bengali hint — improves accuracy
                 fields='id'
-            ).execute()
+            ).execute(num_retries=config.API_RETRIES)
             file_id = uploaded.get('id')
 
             # Export the OCR'd Google Doc as plain text
@@ -456,7 +356,7 @@ class ImageProcessor:
             downloader = MediaIoBaseDownload(text_buffer, request)
             done = False
             while not done:
-                _, done = downloader.next_chunk()
+                _, done = downloader.next_chunk(num_retries=config.API_RETRIES)
 
             raw_text = text_buffer.getvalue().decode('utf-8', errors='replace')
 
@@ -486,7 +386,8 @@ class ImageProcessor:
             # Always delete the temp file from Drive
             if file_id:
                 try:
-                    self._drive_service.files().delete(fileId=file_id).execute()
+                    self._drive_service.files().delete(
+                        fileId=file_id).execute(num_retries=config.API_RETRIES)
                 except Exception as del_e:
                     print(
                         f"Warning: could not delete temp Drive file {file_id}: {del_e}")

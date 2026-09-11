@@ -1,6 +1,5 @@
 opencv-python-headless
 numpy
-pandas
 requests
 Pillow
 beautifulsoup4
@@ -9,7 +8,5 @@ google-api-python-client
 google-auth
 google-auth-httplib2
 google-genai
-openpyxl
-flask
 pywikibot
 urllib3

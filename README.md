@@ -187,7 +187,6 @@ pid/
 | **Wikimedia** | Pywikibot | Upload, page editing, module updates |
 | **Archiving** | Internet Archive Save Page Now API | Preserves source URLs permanently |
 | **Concurrency** | `threading`, `concurrent.futures` | Parallel per-image processing (5 workers) |
-| **Web server** | Flask | Health-check endpoint on Toolforge |
 
 ---
 
@@ -236,15 +235,8 @@ Run the main pipeline once:
 python main.py
 ```
 
-Run as a web service (continuous loop + Flask health endpoint):
-
-```bash
-python main.py --web
-```
-
-The web mode re-runs the full pipeline every **hour** and exposes:
-- `GET /` — status message
-- `GET /health` — JSON health check including scraper thread liveness
+That is the only entry point. Scheduling is Toolforge's job: `toolforge/job.yaml`
+runs `run-bot` on an `@hourly` cron schedule.
 
 ---
 
@@ -252,10 +244,10 @@ The web mode re-runs the full pipeline every **hour** and exposes:
 
 The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wiki/Toolforge) (Kubernetes-based):
 
-- **`Procfile`** defines the web entry point.
+- **`Procfile`** defines the `run-bot` process type that `job.yaml` invokes.
 - **`$TOOL_DATA_DIR`** is automatically set by the Build Service; credential files are read from there.
 - **IPv4 enforcement** is applied at startup (via `config.py`) to avoid Kubernetes IPv6 issues.
-- The bot can also be run as a **Toolforge background job** via the `run_as_job()` entry point in `main.py`.
+- **`toolforge/job.yaml`** registers the hourly background job; there is no web service.
 
 ---
 
@@ -284,4 +276,4 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **Concurrency model:** Up to 5 worker threads process images in parallel. Uploads and `Module:PIDDateData` edits are serialised with a dedicated lock to avoid edit conflicts.
 - **Batch module updates:** Successful upload metadata is queued and written to `Module:PIDDateData` in a single batch edit at the end of each run, minimising API round-trips.
 - **IPv4 enforcement:** `urllib3`'s `allowed_gai_family` is monkey-patched at import time to force IPv4 and avoid Kubernetes/Toolforge IPv6 connectivity issues.
-- **Toolforge ready:** Runtime detection of `TOOLFORGE_WEBSERVICE` env var automatically switches to web-service mode with a background scraper thread.
+- **Toolforge ready:** The bot is a plain one-shot script; Toolforge's job scheduler owns the hourly cadence, so the process has no internal loop to supervise.
