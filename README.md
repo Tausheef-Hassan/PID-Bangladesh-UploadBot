@@ -33,8 +33,8 @@ pressinform.gov.bd
         ▼
  ┌──────────────────┐
  │  Image Processor │  Downloads images (Wayback Machine fallback for 404s).
- │                  │  Detects horizontal separator with Multi-Pass Top-Down
- │                  │  Variance Scanning (see Cropping Algorithm below).
+ │                  │  Detects horizontal separator by vertical edge-column
+ │                  │  scanning (see Cropping Algorithm below).
  │                  │  Crops photograph from Bengali caption.
  │                  │  Performs OCR on caption via Google Drive API.
  └──────┬───────────┘
@@ -61,13 +61,15 @@ pressinform.gov.bd
         │
         ▼
  ┌──────────────────┐
- │  Commons Logger  │  Appends a run summary to the bot's log page on Commons.
+ │  Commons Logger  │  Appends a run summary to the bot's daily JSON log
+ │                  │  page on Commons (one page per day).
  └──────────────────┘
         │
         ▼  (async background thread)
  ┌──────────────────┐
- │  Wayback Machine │  Submits source URLs to the Internet Archive Save Page
- │    Archiver      │  Now API; retries failures from a persistent JSON queue.
+ │  Wayback Machine │  Fires source URLs at the Internet Archive Save Page
+ │    Archiver      │  Now API without waiting for the capture; a persistent
+ │                  │  JSON queue is confirmed on the next run.
  └──────────────────┘
 ```
 
@@ -87,57 +89,82 @@ PID source images are composite JPEGs — a **press photograph on top** and a **
 └──────────────────────────────────┘
 ```
 
-The separator detection runs in **three passes**, implemented in [`src/image_processor.py`](file:///D:/PID/PID%202.0/pid/src/image_processor.py) as `find_white_separator()`.
+Separator detection is a **vertical edge-column scan**, implemented in
+`src/image_processor.py` as `find_white_separator()`. It does not look for a
+white band; it looks for where the flat page colour below the photograph stops
+being flat.
 
-### Pass 1 — Strict white band
-
-| Parameter | Value |
-|---|---|
-| Grayscale threshold | pixel value **> 240** |
-| Required row coverage | **≥ 95 %** of image width |
-| Search window | rows 35 % – 95 % of image height |
-| Minimum consecutive rows (`MIN_RUN`) | `max(3, height / 300)` — scales with image size |
-
-The algorithm converts the image to grayscale and computes, for each row, the fraction of pixels brighter than 240 (pure white). Scanning top-down from 35 % of height, it looks for the first **run** of ≥ `MIN_RUN` consecutive rows that all exceed 95 % coverage.
-
-Using a run (rather than just checking 2–3 rows as before) prevents **JPEG ringing artifacts** — the faint dark fringe that JPEG compression places at high-contrast edges — from creating false positives at the photograph/separator boundary.
-
-The bottom 5 % of the image is excluded to avoid white bottom-padding being mistaken for the separator.
-
-### Pass 2 — Relaxed off-white band
+### Pass 1 — Edge-column uniform runs
 
 | Parameter | Value |
 |---|---|
-| Grayscale threshold | pixel value **> 220** |
-| Required row coverage | **≥ 90 %** of image width |
+| Columns sampled | 8 — `x = 1..4` and `x = width-5..width-2` |
+| Colour tolerance | within **2 %** of 255 per channel, against the running mean |
+| Search floor | rows below **40 %** of image height |
+| Scan start | `height - 6` (skips bottom padding), walking **upwards** |
 
-Older or heavily re-compressed PID images use a **light-grey separator** (not pure white). If pass 1 found nothing, pass 2 repeats the same run-length scan with looser thresholds, catching these cases without affecting the majority of images where pass 1 already succeeds.
+Each of the eight columns walks bottom-up, accumulating pixels for as long as
+each new pixel stays within 2 % of the mean of the pixels already collected.
+Where a column breaks out of that run is its vote for where the caption band
+begins. Sampling only the extreme left and right edges avoids the caption text
+itself, which never reaches the margins.
 
-### Pass 3 — Gradient edge fallback
+### Pass 2 — Cross-column agreement
 
-If no flat-colour band is found at all (unusual layouts, missing separator), the algorithm falls back to a **Sobel horizontal-edge detector**:
+Every (left column, right column) pair is checked:
 
-1. Gaussian blur (5 × 5) to suppress JPEG noise.
-2. Vertical Sobel derivative (`dy`) to amplify horizontal edges.
-3. Sum gradient magnitude per row → `row_energy`.
-4. Find the row with maximum energy in the lower half (50 % – 95 %).
-5. Accept only if that row's energy is **> 2.5 × the mean** — avoids returning a "best" row in a featureless image.
+- pairs whose run heights differ by more than **4 px** are discarded;
+- for the rest, the lower of the two boundary rows is scanned horizontally
+  between the two columns;
+- that row is accepted as a `valid_line` only if **≥ 98 %** of its pixels are
+  within 2 % of the row's own mean colour.
 
-This ensures the function almost never returns `-1`; instead the full-image OCR fallback in `process_image()` is reserved for truly unrecognisable images.
+`cutoff_row` is then `min(valid_lines)`, or — if no pair agreed — the highest
+uniform-run top found by any single column.
+
+> **Known limitation.** `min()` takes the **highest** candidate row, so a single
+> edge column whose uniform run leaks up into the photograph pulls the whole cut
+> with it. Failures are therefore always cuts that are too high, never too low.
+> Measured at roughly 0.3 % of images.
+
+### Pass 3 — Background-row fallback
+
+The fallback (`find_separator_fallback()`) runs when pass 2 produced nothing, or
+when `cutoff_row` lands in the suspicious **38 %–42 %** height band. Starting at
+75 % of image height, it scans downwards for consecutive rows that are ≥ 98 %
+page background — pure white `(255,255,255)` or `#faf9fb` `(250,249,251)`, each
+within the same 2 % tolerance.
+
+The run length required scales with image height:
+
+```python
+fallback_required_lines = round((4 / math.log(3100 / 670)) * math.log(height / 670) + 5)
+```
+
+When the fallback fires, side-whitespace cropping is enabled for that image.
 
 ### Crop offset
 
-After the separator row is found, a small **log-scaled pixel offset** is subtracted so the photograph is not clipped at its very bottom edge:
+A small **log-scaled pixel offset** is subtracted from `cutoff_row` so the
+photograph is not clipped at its very bottom edge:
 
 ```python
-offset = max(2, int(round((3 / math.log(3100 / 670)) * math.log(height / 670))))
+offset = max(2, round(2 + 3 / math.log(3100 / 670) * math.log(height / 670)))
 ```
 
-This scales from ~2 px for a 670 px tall image up to ~5 px for a 3100 px tall image, giving proportional breathing room without wasting caption rows.
+This runs from 2 px at 670 px tall up to ~5 px at 3100 px. The OCR section is
+trimmed from the top by **twice** the same offset, so the separator strip itself
+never reaches the OCR engine.
 
 ### Side whitespace cropping
 
-A separate `crop_side_whitespace()` step removes white (`≥ 250, 250, 250`) or near-white `#fbf9fa` (`≥ 245, 244, 246`) columns from the left and right edges when ≥ 98 % of pixels in a column match. The crop boundary is then expanded outward by the same log-scaled formula to avoid clipping content right at the border.
+`crop_side_whitespace()` removes left and right columns that are ≥ 98 % page
+background — the same two colours and 2 % tolerance the fallback uses. The crop
+boundary is then expanded back outward by the log-scaled formula above to avoid
+clipping content sitting right at the border.
+
+It is **not** applied to every image: `crop_image_sections()` only enables it
+when the pass-3 fallback was used.
 
 ---
 
@@ -146,9 +173,12 @@ A separate `crop_side_whitespace()` step removes white (`≥ 250, 250, 250`) or 
 ```
 pid/
 ├── main.py                      # Pipeline orchestrator
-├── config.py                    # Constants, logging, IPv4 enforcement, retry decorator
+├── config.py                    # Constants, logging, IPv4 enforcement, retrying HTTP session
 ├── credentials.py               # Credential loading (Gemini, GCloud, IA keys)
 ├── requirements.txt
+│
+├── test_pipeline.py             # Offline self-checks: log page size, Wayback tail
+├── test_processor_cv.py         # Separator detection against sample images
 │
 ├── src/
 │   ├── scraper.py               # Web scraping & duplicate detection
@@ -238,6 +268,16 @@ python main.py
 That is the only entry point. Scheduling is Toolforge's job: `toolforge/job.yaml`
 runs `run-bot` on an `@hourly` cron schedule.
 
+### Self-checks
+
+Both test files are plain `assert` scripts — no pytest, no fixtures, no network:
+
+```bash
+python test_pipeline.py       # Commons log page stays under the size limit;
+                              # the Wayback tail honours its wall-clock budget
+python test_processor_cv.py   # separator detection on sample images
+```
+
 ---
 
 ## Deployment on Toolforge
@@ -256,14 +296,15 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 | File | Purpose |
 |---|---|
 | `main.py` | Top-level pipeline orchestrator; wires all modules together |
-| `config.py` | Central constants, logging, retry decorator, IPv4 patch |
+| `config.py` | Central constants, logging, `http_session()` retry policy, IPv4 patch |
 | `credentials.py` | Loads all credentials from files/env at runtime |
 | `src/scraper.py` | Scrapes PID site; compares MD5 checksums against Commons |
 | `src/image_processor.py` | Downloads, crops, and OCRs images |
 | `src/translator.py` | Translation pipeline and Gemini filename generation |
 | `src/uploader.py` | Pywikibot upload and `Module:PIDDateData` batch update |
-| `src/commons_log.py` | Writes run summary to bot log page on Commons |
-| `src/wayback.py` | Async Wayback Machine archiving with persistent retry queue |
+| `src/commons_log.py` | Writes run summary to the bot's **daily** JSON log page on Commons |
+| `test_pipeline.py` | Offline self-checks for the two silent-failure modes (log size, Wayback tail) |
+| `src/wayback.py` | Async Wayback archiving; submits without polling, confirms from the queue next run |
 | `data/translation_replacements.tsv` | Manual OCR correction rules applied before translation |
 | `wayback_pending.json` | Persistent queue for failed Wayback Machine submissions |
 
@@ -271,9 +312,11 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 
 ## Development Conventions
 
-- **Resilience:** Every network and AI call is wrapped in exponential-backoff retry logic (`config.retry_on_failure`). Max retries and backoff parameters are configurable in `config.py`.
+- **Resilience:** HTTP calls go through `config.http_session()` — a `requests.Session` carrying a `urllib3` `Retry` (exponential backoff with jitter, `429`/`5xx` retried, transport errors retried). Only idempotent methods are retried, so a Save Page Now `POST` is never resubmitted behind the bot's back. Google API calls use the client library's own `num_retries=config.API_RETRIES`.
 - **Duplicate prevention:** MD5 checksums of raw image bytes are compared against all existing Wikimedia Commons records *before* any AI processing, saving API quota.
 - **Concurrency model:** Up to 5 worker threads process images in parallel. Uploads and `Module:PIDDateData` edits are serialised with a dedicated lock to avoid edit conflicts.
 - **Batch module updates:** Successful upload metadata is queued and written to `Module:PIDDateData` in a single batch edit at the end of each run, minimising API round-trips.
 - **IPv4 enforcement:** `urllib3`'s `allowed_gai_family` is monkey-patched at import time to force IPv4 and avoid Kubernetes/Toolforge IPv6 connectivity issues.
+- **Bounded log pages:** The Commons log is one JSON page per day. Every run rewrites the whole page, so a month of hourly runs on a single page would cross `$wgMaxArticleSize` and every subsequent save would fail silently. `wikitext_description` is stripped before logging for the same reason — it is the heaviest key and is rebuilt at upload time anyway.
+- **Bounded Wayback tail:** Archive submissions are fire-and-forget (`confirm=False`); polling SPN2 costs up to 90 s per URL and the pool thread is non-daemon, which kept the hourly job alive long after its work was done. Unconfirmed URLs sit in `wayback_pending.json` and the next run's confirmation pass clears them under a `RETRY_BUDGET` wall-clock cap (600 s).
 - **Toolforge ready:** The bot is a plain one-shot script; Toolforge's job scheduler owns the hourly cadence, so the process has no internal loop to supervise.
