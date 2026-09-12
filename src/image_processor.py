@@ -11,6 +11,7 @@ from io import BytesIO
 
 import cv2
 import numpy as np
+import requests
 from PIL import Image, ImageFile, ImageOps
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
