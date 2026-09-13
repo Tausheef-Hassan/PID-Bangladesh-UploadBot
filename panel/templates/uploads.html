@@ -1,20 +1,70 @@
 {% extends 'base.html' %}
-{% block title %}Uploads — pid-bot{% endblock %}
+{% block title %}{{ queues[queue].label }} — pid-bot{% endblock %}
 {% block content %}
 
-  <section class="card" id="detail">
-    <h2>Image detail</h2>
-    <p class="hint">Pick an upload below to compare it against the original and
-      see the text the bot read off it.</p>
-  </section>
+<section class="card">
+  <div class="queuebar">
+    {% for key, q in queues.items() %}
+      <a class="seg {% if queue == key %}on{% endif %}"
+         href="{{ url_for('uploads', queue=key, year=year,
+                          month=month if key != 'review' or month else None) }}">
+        {{ q.label }}{% if key == 'uncategorised' %} ({{ uncategorised_count }}){% endif %}
+      </a>
+    {% endfor %}
 
-  <section class="card">
-    <h2>Recent uploads</h2>
-    <p class="hint">What the bot has published, newest first. Refreshes every minute.</p>
-    <div hx-get="{{ url_for('partial_gallery') }}"
-         hx-trigger="load, every 60s" hx-swap="innerHTML">
-      <p class="hint">Loading…</p>
+    {% if queue != 'uncategorised' %}
+      <form method="get" action="{{ url_for('uploads') }}" class="monthpick">
+        <input type="hidden" name="queue" value="{{ queue }}">
+        <select name="year" onchange="this.form.submit()">
+          {% for y in years %}
+            <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}</option>
+          {% endfor %}
+        </select>
+        <select name="month" onchange="this.form.submit()">
+          <option value="">{% if queue == 'review' %}every month{% else %}pick a month{% endif %}</option>
+          {% for m in months %}
+            <option value="{{ m }}" {% if m == month %}selected{% endif %}>
+              {{ m.replace('PID-BD images from ', '') }}</option>
+          {% endfor %}
+        </select>
+      </form>
+    {% endif %}
+  </div>
+
+  <p class="hint">{{ queues[queue].blurb }}
+    {% if total %}<b>{{ '{:,}'.format(total) }}</b> file{{ '' if total == 1 else 's' }} in this queue.{% endif %}
+  </p>
+
+  {% if not titles %}
+    <p class="prose">Nothing here. Either the queue is clear or Commons is unreachable.</p>
+  {% else %}
+    <div class="grid">
+      {% for t in titles %}
+        <figure class="shot">
+          <a href="{{ url_for('file_detail', title=t, queue=queue, month=month,
+                              offset=offset, cursor=cursor if cursor is defined else '') }}">
+            <img src="{{ thumb(t[5:], 320) }}" alt="{{ t[5:] }}" loading="lazy">
+          </a>
+          <figcaption title="{{ t[5:] }}">{{ t[5:].rsplit('.', 1)[0] }}</figcaption>
+        </figure>
+      {% endfor %}
     </div>
-  </section>
+
+    <div class="pager">
+      {% if offset %}
+        <a class="link" href="{{ url_for('uploads', queue=queue, year=year, month=month,
+                                         offset=[offset - titles|length, 0]|max) }}">Previous page</a>
+      {% endif %}
+      <span class="hint">{{ titles|length }} shown{% if offset %}, from {{ offset }}{% endif %}</span>
+      {% if next_offset %}
+        <a class="link" href="{{ url_for('uploads', queue=queue, year=year, month=month,
+                                         offset=next_offset) }}">Next page</a>
+      {% elif next_cursor %}
+        <a class="link" href="{{ url_for('uploads', queue=queue, year=year, month=month,
+                                         cursor=next_cursor) }}">Next page</a>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
 
 {% endblock %}

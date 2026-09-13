@@ -132,3 +132,35 @@ def fetch_wikitext(title):
         return r.json()['parse']['wikitext']
     except Exception:
         return None
+
+
+def set_caption(access_token, page_id, text, lang='en'):
+    """Set the structured-data caption (a MediaInfo label) on a file.
+
+    Captions are not wikitext: they live on the M<pageid> entity and are set
+    through the Wikibase API. Most PID files have none at all.
+    """
+    auth = _auth(access_token)
+    headers = {'User-Agent': USER_AGENT}
+
+    csrf = session.get(COMMONS_API, auth=auth, headers=headers, timeout=20,
+                       params={'action': 'query', 'meta': 'tokens',
+                               'type': 'csrf', 'format': 'json'}).json()
+    token = csrf.get('query', {}).get('tokens', {}).get('csrftoken')
+    if not token:
+        raise RuntimeError('Commons did not issue an edit token; sign in again.')
+
+    result = session.post(COMMONS_API, auth=auth, headers=headers, timeout=30,
+                          data={'action': 'wbsetlabel', 'format': 'json',
+                                'id': f'M{page_id}', 'language': lang,
+                                'value': text.strip(),
+                                'summary': 'Caption set via the PID control panel',
+                                'bot': '0', 'token': token}).json()
+    if 'error' in result:
+        info = result['error'].get('info', str(result['error']))
+        if 'permissiondenied' in str(result['error'].get('code', '')):
+            raise RuntimeError(
+                'Your OAuth grant does not cover structured data. Re-propose the '
+                'consumer including the "Edit structured data" grant. ' + info)
+        raise RuntimeError(info)
+    return result

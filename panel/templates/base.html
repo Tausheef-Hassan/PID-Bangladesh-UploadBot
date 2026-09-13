@@ -14,7 +14,7 @@
     <a class="brand" href="{{ url_for('index') }}">pid-bot</a>
 
     <div class="routes">
-      {% for endpoint, label in [('index', 'Overview'), ('uploads', 'Uploads'),
+      {% for endpoint, label in [('index', 'Overview'), ('uploads', 'Review'),
                                  ('queue', 'Queue'), ('replacements', 'Replacements')] %}
         <a class="route {% if request.endpoint == endpoint %}active{% endif %}"
            href="{{ url_for(endpoint) }}">{{ label }}</a>

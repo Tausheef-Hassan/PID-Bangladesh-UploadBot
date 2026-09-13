@@ -397,11 +397,6 @@ def index():
         **view, **page_context())
 
 
-@app.get('/uploads')
-def uploads():
-    return render_template('uploads.html')
-
-
 @app.get('/queue')
 def queue():
     return render_template('queue.html')
@@ -629,6 +624,174 @@ def save_description(unique_id):
 
     flash('Saved to Commons.')
     return redirect(url_for('upload_detail', unique_id=unique_id))
+
+
+# ── Commons work queues ───────────────────────────────────────────────────────
+#
+# The queues come from Commons, not from PIDDateData: the backlog is tens of
+# thousands of files, most uploaded long before this panel existed.
+
+QUEUES = {
+    'review': {
+        'label': 'Needs review',
+        'blurb': 'Still carrying the auto-translated marker. Check the English '
+                 'against the Bengali, fix it, then clear the marker.',
+    },
+    'uncategorised': {
+        'label': 'Needs categories',
+        'blurb': 'In no topic category. Add what the photograph actually shows.',
+    },
+    'month': {
+        'label': 'Browse by month',
+        'blurb': 'Everything the bot filed for a given month.',
+    },
+}
+
+
+def _queue_titles(queue, month, offset, cursor):
+    """(titles, next_offset, next_cursor, total) for one page of a queue."""
+    bucket = commons._bucket()
+    if queue == 'uncategorised':
+        titles, nxt = commons.category_page(commons.UNCATEGORISED, cursor, bucket)
+        return titles, None, nxt, commons.category_size(commons.UNCATEGORISED, bucket)
+    if queue == 'month':
+        target = month or commons.month_categories(
+            datetime.now(timezone.utc).year)[datetime.now(timezone.utc).month - 1]
+        titles, nxt = commons.category_page(target, cursor, bucket)
+        return titles, None, nxt, commons.category_size(target, bucket)
+
+    search = commons.REVIEW_SEARCH + (' incategory:"%s"' % month if month else '')
+    titles, total = commons.search_page(search, offset, bucket)
+    return titles, offset + len(titles), '', total
+
+
+@app.get('/uploads')
+def uploads():
+    queue = request.args.get('queue', 'review')
+    if queue not in QUEUES:
+        queue = 'review'
+    year = request.args.get('year', str(datetime.now(timezone.utc).year))
+    month = request.args.get('month', '')
+    offset = int(request.args.get('offset', 0) or 0)
+    cursor = request.args.get('cursor', '')
+
+    titles, next_offset, next_cursor, total = _queue_titles(
+        queue, month, offset, cursor)
+    bucket = commons._bucket()
+
+    return render_template(
+        'uploads.html', queue=queue, queues=QUEUES, year=year, month=month,
+        titles=titles, total=total, offset=offset,
+        next_offset=next_offset, next_cursor=next_cursor,
+        months=commons.month_categories(year),
+        years=[str(y) for y in range(datetime.now(timezone.utc).year, 2014, -1)],
+        uncategorised_count=commons.category_size(commons.UNCATEGORISED, bucket),
+        thumb=commons.thumb_url)
+
+
+@app.get('/file/<path:title>')
+def file_detail(title):
+    """One file's editor, with prev/next that walk the queue it came from.
+
+    Staying inside the queue is the point: a backlog of eight thousand is only
+    tractable if finishing one file puts you on the next one.
+    """
+    if not title.startswith('File:'):
+        abort(404)
+
+    queue = request.args.get('queue', 'review')
+    month = request.args.get('month', '')
+    offset = int(request.args.get('offset', 0) or 0)
+    cursor = request.args.get('cursor', '')
+
+    titles, _next_offset, _next_cursor, total = _queue_titles(
+        queue, month, offset, cursor)
+    position = titles.index(title) if title in titles else None
+
+    page = wikiauth.fetch_wikitext(title)
+    english, auto_translated, categories = '', True, []
+    parse_error, source_url = '', ''
+    if page is None:
+        parse_error = "Couldn't read the page from Commons."
+    else:
+        source_url = wikitext.read_source_url(page)
+        try:
+            english, auto_translated = wikitext.read_english(page)
+            categories = wikitext.read_categories(page)
+        except wikitext.Unparseable as e:
+            parse_error = 'Not in the shape the bot writes (%s), so the description is not editable here.' % e
+
+    bucket = commons._bucket()
+    return render_template(
+        'file.html', title=title, filename=title[len('File:'):],
+        english=english, auto_translated=auto_translated,
+        categories="\n".join(categories), parse_error=parse_error,
+        source_url=source_url, caption=commons.caption(title, bucket),
+        prev_title=titles[position - 1] if position else None,
+        next_title=(titles[position + 1]
+                    if position is not None and position + 1 < len(titles) else None),
+        position=position, page_count=len(titles), total=total,
+        queue=queue, month=month, offset=offset, cursor=cursor, queues=QUEUES,
+        thumb=commons.thumb_url, filepage=commons.file_page_url)
+
+
+@app.post('/file/<path:title>')
+def save_file(title):
+    """Apply caption, description and categories to one Commons file."""
+    if not title.startswith('File:'):
+        abort(404)
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.form.get('queue', 'review'),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', '')}
+
+    page = wikiauth.fetch_wikitext(title)
+    if page is None:
+        flash("Couldn't read that page from Commons; nothing was changed.")
+        return redirect(url_for('file_detail', title=title, **onward))
+
+    changed = []
+    bucket = commons._bucket()
+
+    new_caption = request.form.get('caption', '').strip()
+    if new_caption and new_caption != commons.caption(title, bucket):
+        try:
+            wikiauth.set_caption(
+                tuple(token), commons.page_id(title, bucket), new_caption)
+            changed.append('caption')
+        except Exception as e:
+            flash('Caption not saved: %s' % e)
+
+    updated = page
+    try:
+        updated = wikitext.write_english(
+            page, request.form.get('english', ''),
+            mark_auto_translated=request.form.get('reviewed') != 'on')
+        updated = wikitext.write_categories(
+            updated, request.form.get('categories', '').splitlines())
+    except wikitext.Unparseable as e:
+        flash('Description not saved: %s' % e)
+        updated = page
+
+    if updated != page:
+        try:
+            wikiauth.edit_description(
+                tuple(token), title, updated,
+                'Reviewed the auto-translated description via the PID control panel')
+            changed.append('description and categories')
+        except Exception as e:
+            flash('Commons refused the edit: %s' % e)
+
+    flash('Saved %s.' % ' and '.join(changed) if changed else 'Nothing to save.')
+
+    # Land on the next file, so reviewing a queue is one continuous pass.
+    return redirect(url_for('file_detail',
+                            title=request.form.get('next_title') or title,
+                            **onward))
 
 
 @app.get('/source-image')

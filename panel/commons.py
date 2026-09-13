@@ -124,3 +124,80 @@ def find_upload(unique_id):
         if record.get('unique_id') == unique_id:
             return record
     return None
+
+
+# ── Browsing Commons itself ───────────────────────────────────────────────────
+#
+# The bot's own PIDDateData only knows what this bot uploaded recently. The
+# category tree knows every PID image on Commons, including the backlog, so the
+# work queues are built from Commons rather than from our own records.
+
+PID_ROOT = 'Press Information Department images'
+UNCATEGORISED = 'Press Information Department images without category'
+REVIEW_SEARCH = 'hastemplate:"Auto-translated PID English description"'
+
+MONTHS = ('January', 'February', 'March', 'April', 'May', 'June', 'July',
+          'August', 'September', 'October', 'November', 'December')
+
+
+def _api(**params):
+    params.setdefault('format', 'json')
+    params.setdefault('formatversion', 2)
+    params['action'] = params.get('action', 'query')
+    try:
+        r = session.get(f'{BASE}/w/api.php', params=params, timeout=15,
+                        headers={'User-Agent': 'pid-bot-panel'})
+        return r.json()
+    except Exception:
+        return {}
+
+
+@lru_cache(maxsize=64)
+def category_page(title, cursor, bucket, limit=48):
+    """One page of files in a category. Returns (titles, next_cursor)."""
+    data = _api(list='categorymembers', cmtitle=f'Category:{title}',
+                cmtype='file', cmlimit=limit, cmsort='timestamp', cmdir='desc',
+                **({'cmcontinue': cursor} if cursor else {}))
+    members = data.get('query', {}).get('categorymembers', [])
+    return (tuple(m['title'] for m in members),
+            data.get('continue', {}).get('cmcontinue', ''))
+
+
+@lru_cache(maxsize=64)
+def search_page(query, offset, bucket, limit=48):
+    """One page of a CirrusSearch query over files. Returns (titles, total)."""
+    data = _api(list='search', srsearch=query, srnamespace=6, srlimit=limit,
+                sroffset=offset or 0, srinfo='totalhits', srprop='')
+    result = data.get('query', {})
+    return (tuple(r['title'] for r in result.get('search', [])),
+            result.get('searchinfo', {}).get('totalhits', 0))
+
+
+@lru_cache(maxsize=32)
+def category_size(title, bucket):
+    """How many files a category holds, for the queue counts."""
+    pages = _api(prop='categoryinfo', titles=f'Category:{title}').get(
+        'query', {}).get('pages', [{}])
+    return pages[0].get('categoryinfo', {}).get('files', 0)
+
+
+def month_categories(year):
+    return [f'PID-BD images from {m} {year}' for m in MONTHS]
+
+
+@lru_cache(maxsize=256)
+def page_id(title, bucket):
+    """Page id, which is also the MediaInfo entity id (M<pageid>)."""
+    pages = _api(prop='info', titles=title).get('query', {}).get('pages', [{}])
+    return pages[0].get('pageid')
+
+
+@lru_cache(maxsize=256)
+def caption(title, bucket, lang='en'):
+    """The structured-data caption, or ''. PID files mostly have none."""
+    pid = page_id(title, bucket)
+    if not pid:
+        return ''
+    data = _api(action='wbgetentities', ids=f'M{pid}')
+    entity = (data.get('entities') or {}).get(f'M{pid}', {})
+    return (entity.get('labels', {}).get(lang, {}) or {}).get('value', '')

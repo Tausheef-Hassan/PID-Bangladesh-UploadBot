@@ -118,3 +118,16 @@ def write_categories(text, categories):
     if not cleaned:
         return stripped + '\n'
     return stripped + '\n' + '\n'.join(f'[[Category:{c}]]' for c in cleaned) + '\n'
+
+
+SOURCE_URL = re.compile(r'\{\{\s*Source-PID\s*\|[^}]*?url\s*=\s*([^|}\s]+)', re.I)
+
+
+def read_source_url(text):
+    """The original PID url from {{Source-PID|url=...}}, or ''.
+
+    Lets the side-by-side comparison work for any PID file on Commons, not just
+    the ones this bot recorded in PIDDateData.
+    """
+    match = SOURCE_URL.search(text or '')
+    return match.group(1).strip() if match else ''

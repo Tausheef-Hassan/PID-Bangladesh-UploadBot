@@ -1,0 +1,109 @@
+{% extends 'base.html' %}
+{% block title %}{{ filename }} — pid-bot{% endblock %}
+{% block content %}
+
+<section class="card">
+  {# Queue position and the two keys that matter, at the top where your hands are. #}
+  <div class="queuenav">
+    <a class="link small" href="{{ url_for('uploads', queue=queue, month=month,
+                                           offset=offset, cursor=cursor) }}">
+      &larr; {{ queues[queue].label }}</a>
+    {% if position is not none %}
+      <span class="hint">{{ position + 1 }} of {{ page_count }} on this page{% if total %},
+        {{ '{:,}'.format(total) }} in the queue{% endif %}</span>
+    {% endif %}
+    <span class="queuenav-keys">
+      {% if prev_title %}
+        <a class="seg" id="prevlink"
+           href="{{ url_for('file_detail', title=prev_title, queue=queue, month=month,
+                            offset=offset, cursor=cursor) }}">&larr; Previous</a>
+      {% endif %}
+      {% if next_title %}
+        <a class="seg" id="nextlink"
+           href="{{ url_for('file_detail', title=next_title, queue=queue, month=month,
+                            offset=offset, cursor=cursor) }}">Next &rarr;</a>
+      {% endif %}
+    </span>
+  </div>
+
+  <h2 class="filetitle">{{ filename }}</h2>
+  <p class="hint"><a class="link" href="{{ filepage(filename) }}">Open on Commons</a></p>
+
+  <div class="workbench">
+    <div class="compare">
+      {% if source_url %}
+        <figure>
+          <img src="{{ url_for('source_image', url=source_url) }}" alt="Original as published" loading="lazy">
+          <figcaption>Original, as published by PID</figcaption>
+        </figure>
+      {% endif %}
+      <figure>
+        <img src="{{ thumb(filename, 800) }}" alt="{{ filename }}" loading="lazy">
+        <figcaption>On Commons, after cropping</figcaption>
+      </figure>
+    </div>
+
+    <div class="editpane">
+      {% if parse_error %}
+        <p class="aside compact">{{ parse_error }}</p>
+      {% endif %}
+
+      {% if not wiki_configured %}
+        <p class="aside compact">Wikimedia sign-in is not set up on this tool, so
+          this file can only be edited on Commons itself.</p>
+      {% elif not wiki_user %}
+        <p class="hint">
+          <a class="link" href="{{ url_for('oauth_start') }}">Sign in with your Wikimedia account</a>
+          to edit. Changes are saved under your name, not the bot's.
+        </p>
+        <div class="readout"><p>{{ english }}</p></div>
+      {% else %}
+        <form method="post" class="editor"
+              action="{{ url_for('save_file', title=title) }}">
+          <input type="hidden" name="queue" value="{{ queue }}">
+          <input type="hidden" name="month" value="{{ month }}">
+          <input type="hidden" name="offset" value="{{ offset }}">
+          <input type="hidden" name="cursor" value="{{ cursor }}">
+
+          <label for="caption" class="stat-l">Caption — one short line, shown under the image</label>
+          <input id="caption" name="caption" value="{{ caption }}"
+                 placeholder="{% if not caption %}No caption set{% endif %}">
+
+          <label for="english" class="stat-l">English description</label>
+          <textarea id="english" name="english" rows="7">{{ english }}</textarea>
+
+          <label class="check">
+            <input type="checkbox" name="reviewed" {% if not auto_translated %}checked{% endif %}>
+            I have checked this against the Bengali — drop the auto-translated marker
+          </label>
+
+          <label for="categories" class="stat-l">Topic categories, one per line</label>
+          <textarea id="categories" name="categories" rows="5"
+                    placeholder="Zubaida Rahman&#10;Bangladesh Innovation Fair 2026">{{ categories }}</textarea>
+          <p class="hint">Date and PID categories come from the templates and are not listed here.</p>
+
+          <div class="editor-actions">
+            <button type="submit">Save</button>
+            {% if next_title %}
+              <button type="submit" name="next_title" value="{{ next_title }}"
+                      class="quiet">Save and go to next</button>
+            {% endif %}
+          </div>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<script>
+  // Arrow keys walk the queue, unless you are typing into the form.
+  document.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    var link = e.key === 'ArrowLeft' ? document.getElementById('prevlink')
+             : e.key === 'ArrowRight' ? document.getElementById('nextlink') : null;
+    if (link) { e.preventDefault(); window.location = link.href; }
+  });
+</script>
+
+{% endblock %}
