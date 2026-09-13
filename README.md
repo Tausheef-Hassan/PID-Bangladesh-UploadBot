@@ -287,7 +287,19 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **`Procfile`** defines the `run-bot` process type that `job.yaml` invokes.
 - **`$TOOL_DATA_DIR`** is automatically set by the Build Service; credential files are read from there.
 - **IPv4 enforcement** is applied at startup (via `config.py`) to avoid Kubernetes IPv6 issues.
-- **`toolforge/job.yaml`** registers the hourly background job.
+- **`toolforge/job.yaml`** registers the hourly background job. The Build Service
+  builds straight from GitHub and never clones the repo into the tool's home, so
+  this file is **not** on the bastion — fetch it before loading:
+
+  ```bash
+  curl -fsSL -o ~/job.yaml     https://raw.githubusercontent.com/Tausheef-Hassan/PID-Bangladesh-UploadBot/control-panel/toolforge/job.yaml
+  toolforge jobs load ~/job.yaml
+  ```
+
+  `toolforge jobs load` reports a missing file as `ERROR: Unable to parse yaml
+  file` — its `open()` sits inside the same `try` as the YAML parse and it
+  catches bare `Exception` (`jobs_cli/cli.py:1016`). If you see that error, check
+  the path exists before you go looking for a syntax problem.
 - **`Procfile` order matters.** `toolforge webservice buildservice start` runs the
   *first* entry in the Procfile whatever it is called, so `web` must stay above
   `run-bot`. With `run-bot` first the webservice would launch the pipeline, which
