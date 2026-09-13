@@ -11,57 +11,61 @@
 
 {% with messages = get_flashed_messages() %}
   {% if messages %}
-    <ul class="notices">
-      {% for m in messages %}<li>{{ m }}</li>{% endfor %}
-    </ul>
+    <ul class="notices">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
   {% endif %}
 {% endwith %}
 
-<div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
-     hx-trigger="every 5s" hx-swap="outerHTML">
-  {% include '_dashboard.html' %}
-</div>
+<main class="wrap">
 
-<section class="pane">
-  <div class="rule"></div>
-  <div class="pane-grid">
-    <div>
-      <h2>Live log</h2>
-      <div id="log" hx-get="{{ url_for('partial_log') }}"
-           hx-trigger="every 3s" hx-swap="innerHTML">
-        {% include '_log.html' %}
-      </div>
-    </div>
-
-    <div>
-      <h2>Tools</h2>
-      <p class="prose">
-        Bengali replacements are applied to OCR text before it reaches the
-        translator, so fixing one here changes every future run without a rebuild.
-      </p>
-      <a class="link" href="{{ url_for('replacements') }}">Edit Bengali replacements</a>
-
-      {% if controls_enabled %}
-        {% if signed_in %}
-          <form method="post" action="{{ url_for('sign_out') }}" class="signin">
-            <button type="submit" class="quiet">Sign out</button>
-          </form>
-        {% else %}
-          <form method="post" action="{{ url_for('sign_in') }}" class="signin">
-            <label for="token">Panel key</label>
-            <input id="token" name="token" type="password" autocomplete="current-password">
-            <button type="submit">Sign in</button>
-          </form>
-        {% endif %}
-      {% else %}
-        <p class="prose warn">
-          Controls are off. Add a secret to <code>panel.key</code> in the tool's
-          data directory to turn them on.
-        </p>
-      {% endif %}
-    </div>
+  <div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
+       hx-trigger="every 5s" hx-swap="outerHTML">
+    {% include '_dashboard.html' %}
   </div>
-</section>
 
+  <section class="card">
+    <h2>Live log</h2>
+    <p class="hint">The job's output, newest at the bottom. Refreshes every few seconds.</p>
+    <div id="log" hx-get="{{ url_for('partial_log') }}"
+         hx-trigger="every 3s" hx-swap="innerHTML">
+      {% include '_log.html' %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Bengali replacements</h2>
+    <p class="prose">
+      These are applied to OCR text before it reaches the translator, so fixing
+      one here changes every future run without a rebuild.
+    </p>
+    <a class="link" href="{{ url_for('replacements') }}">Open the replacement list</a>
+  </section>
+
+  <section class="card">
+    {% if controls_enabled %}
+      {% if signed_in %}
+        <h2>Signed in</h2>
+        <p class="prose">The controls above are unlocked for this browser.</p>
+        <form method="post" action="{{ url_for('sign_out') }}" class="signin">
+          <button type="submit" class="quiet">Sign out</button>
+        </form>
+      {% else %}
+        <h2>Sign in to use the controls</h2>
+        <p class="prose">Running, pausing and stopping the job need the panel key.</p>
+        <form method="post" action="{{ url_for('sign_in') }}" class="signin">
+          <label for="token">Panel key</label>
+          <input id="token" name="token" type="password" autocomplete="current-password">
+          <button type="submit">Sign in</button>
+        </form>
+      {% endif %}
+    {% else %}
+      <h2>Controls are off</h2>
+      <p class="prose">
+        Add a secret to <code>panel.key</code> in the tool's data directory to
+        turn on Run, Pause and Stop. Until then this page is read-only.
+      </p>
+    {% endif %}
+  </section>
+
+</main>
 </body>
 </html>

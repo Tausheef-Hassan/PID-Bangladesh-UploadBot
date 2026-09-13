@@ -1,249 +1,276 @@
 /* panel.css
  *
- * Structure borrows the matra (মাত্রা) — the headline stroke Bengali letters
- * hang beneath. Sections hang below full-bleed rules instead of sitting in
- * cards, which suits a page whose content is Bengali press captions.
+ * Follows docs/STYLE_GUIDE.md from Feather: soft blue-gray canvas, white
+ * working surfaces, navy text, restrained shadows, blue actions. No dark
+ * panels, no gradients, no decorative texture.
  *
- * The heartbeat strip is the one loud element: this bot lives on an hourly
- * clock, so its pulse is the thing worth showing first. Everything else stays
- * quiet.
+ * One question gets answered above the fold — is the bot fine? — so the state
+ * is the headline rather than the tool's name, which you already know.
+ *
+ * Status colour is limited to meaning, as pale grounds with dark readable
+ * text: green for a live run, red for a failure, neutral for a quiet hour.
+ * That keeps a bad hour findable in a strip of 48 at a glance.
  */
 
-/* Bengali OCR text gets a Bengali face; Latin keeps the UI face. local() only,
- * so the panel makes no third-party font requests and ships no binaries. */
-@font-face {
-  font-family: 'BengaliText';
-  src: local('Noto Sans Bengali'), local('Nirmala UI'),
-       local('Vrinda'), local('Shonar Bangla');
-  unicode-range: U+0980-09FF, U+200C-200D;
-}
+@import url('fonts.css');
 
 :root {
-  --paper:  #E9ECEF;
-  --ink:    #16202B;
-  --matra:  #1F3A5F;
-  --live:   #0F766E;
-  --ok:     #3F6212;
-  --fail:   #9F1239;
-  --muted:  #5C6B7A;
+  --bg:          #e7f0f8;
+  --surface:     #ffffff;
+  --surface-alt: #f4f8fb;
+  --border:      #c7d6e3;
+  --text:        #20364d;
+  --muted:       #47637c;
+  --accent:      #355b80;
 
-  --gutter: 2.5rem;
-  --sans: 'BengaliText', Archivo, 'Segoe UI Variable Text', system-ui,
-          -apple-system, 'Segoe UI', sans-serif;
-  --mono: 'BengaliText', 'IBM Plex Mono', ui-monospace, 'Cascadia Mono',
-          'DejaVu Sans Mono', monospace;
+  /* Status: pale ground, dark text. */
+  --ok-bg:   #e3f1e8;  --ok-text:   #1c5f3f;
+  --bad-bg:  #fae5e5;  --bad-text:  #8f2525;
+  --warn-bg: #fcf1da;  --warn-text: #7d5a06;
+
+  --shadow: 0 8px 24px rgba(32, 54, 77, .08);
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --gutter: clamp(1.1rem, 4vw, 3rem);
+  --sans: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: IBMPlexMono, ui-monospace, 'Cascadia Mono', monospace;
+  --bn: NotoSansBengali, 'Nirmala UI', sans-serif;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  padding: 0 var(--gutter) 4rem;
-  background: var(--paper);
-  color: var(--ink);
+  padding: 0 0 3rem;
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.5;
+  font-size: 0.95rem;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── The matra ─────────────────────────────────────────────────────────────
-   Structural members, not hairline dividers: content hangs off them. */
-.rule {
-  height: 2px;
-  background: var(--matra);
-  margin: 2.25rem calc(-1 * var(--gutter)) 0;
-}
-.rule-top { margin-top: 0; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--gutter); }
 
-/* ── Head ──────────────────────────────────────────────────────────────── */
-.head { padding-top: 1.1rem; }
+/* Panels: one white surface per idea, never nested. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.6rem 1.8rem;
+  margin-top: 1.4rem;
+}
+
+/* ── State ─────────────────────────────────────────────────────────────── */
+.jobname {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0 0 0.55rem;
+}
 
 h1 {
   margin: 0;
-  font-size: clamp(2rem, 6vw, 3.25rem);
+  font-size: clamp(1.9rem, 5vw, 2.75rem);
   font-weight: 700;
-  font-stretch: 85%;          /* Archivo's width axis, where available */
   letter-spacing: -0.02em;
-  line-height: 1;
+  line-height: 1.05;
+  color: var(--text);
 }
 
-h2 {
-  margin: 1.1rem 0 0.6rem;
-  font-size: 1rem;
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.2rem 0.8rem;
+  font-size: 0.8rem;
   font-weight: 600;
+  background: var(--surface-alt);
   color: var(--muted);
+  vertical-align: 0.5rem;
+  margin-left: 0.6rem;
+}
+.pill-running { background: var(--ok-bg);  color: var(--ok-text); }
+.pill-failed  { background: var(--bad-bg); color: var(--bad-text); }
+.pill-warn    { background: var(--warn-bg); color: var(--warn-text); }
+
+.since { margin: 0.7rem 0 0; color: var(--muted); }
+.since b { color: var(--text); font-weight: 600; }
+
+.aside {
+  margin: 1rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 0.87rem;
+  max-width: 68ch;
 }
 
-.state {
-  margin: 0.5rem 0 0;
-  font-size: 1.15rem;
-  font-weight: 600;
-}
-.state-running   { color: var(--live); }
-.state-succeeded { color: var(--ok); }
-.state-failed    { color: var(--fail); }
-.state-no-job,
-.state-unknown   { color: var(--muted); }
+/* ── Numbers ───────────────────────────────────────────────────────────── */
+.stats { display: flex; flex-wrap: wrap; gap: 0 2.75rem; margin-top: 1.5rem; }
+.stat  { display: flex; flex-direction: column; }
 
-.dur {
+.stat-n {
   font-family: var(--mono);
-  font-size: 0.9rem;
-  font-weight: 400;
-  color: var(--muted);
-  margin-left: 0.5rem;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.75rem;
+  line-height: 1.15;
 }
+.stat-n.is-zero  { color: var(--border); }
+.stat-n.is-alert { color: var(--bad-text); }
+.stat-l { font-size: 0.8rem; color: var(--muted); }
 
-.detail { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.9rem; }
-
-/* ── Heartbeat ─────────────────────────────────────────────────────────────
-   One tick per hourly run. Height is images uploaded, colour is outcome. */
+/* ── Run strip ─────────────────────────────────────────────────────────── */
 .beat {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  height: 88px;
-  margin-top: 1.4rem;
+  gap: 3px;
+  height: 60px;
+  margin-top: 0.4rem;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
 }
 
 .tick {
   flex: 1 1 0;
-  min-width: 2px;
-  background: var(--matra);
-  opacity: 0.5;
-  transition: opacity 0.15s;
+  min-width: 3px;
+  background: #9db6cc;              /* a quiet hour is not news */
+  border-radius: 3px 3px 0 0;
 }
-.tick:hover { opacity: 1; }
-.tick-succeeded { background: var(--ok); }
-.tick-failed    { background: var(--fail); opacity: 0.9; }
-.tick-running   { background: var(--live); opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
+.tick:hover { background: var(--accent); }
+.tick-failed  { background: #d05a5a !important; height: 100% !important; }
+.tick-running { background: var(--ok-text) !important; animation: breathe 1.8s ease-in-out infinite; }
 
-@keyframes pulse { 50% { opacity: 0.35; } }
+@keyframes breathe { 50% { opacity: .35; } }
 
-.empty { color: var(--muted); margin: 0; align-self: center; }
-
-/* ── Meta row ──────────────────────────────────────────────────────────── */
-.meta {
+.beat-caption {
   display: flex;
-  flex-wrap: wrap;
-  gap: 2.25rem;
-  align-items: flex-start;
-  padding-top: 1rem;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding-top: 0.45rem;
 }
 
-.meta-item { display: flex; flex-direction: column; }
+.empty { color: var(--muted); margin: 0; align-self: center; font-size: 0.9rem; }
 
-.meta-value {
-  font-size: 1.35rem;
-  font-weight: 600;
-  line-height: 1.15;
-}
-.meta-item.nums .meta-value { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.meta-value.bad { color: var(--fail); }
-
-.meta-name { font-size: 0.85rem; color: var(--muted); }
-
-.actions { display: flex; gap: 0.6rem; margin-left: auto; flex-wrap: wrap; }
+/* ── Actions ───────────────────────────────────────────────────────────── */
+.actions { display: flex; gap: 0.55rem; flex-wrap: wrap; margin-top: 1.5rem; }
 .actions form { margin: 0; }
 
-/* ── Controls ──────────────────────────────────────────────────────────── */
 button {
   font: inherit;
+  font-size: 0.88rem;
   font-weight: 600;
-  color: var(--paper);
-  background: var(--matra);
-  border: 2px solid var(--matra);
-  border-radius: 2px;
-  padding: 0.5rem 1.1rem;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 1.05rem;
   cursor: pointer;
 }
-button:hover { background: var(--ink); border-color: var(--ink); }
+button:hover { background: #2b4a69; border-color: #2b4a69; }
 
-button.quiet { background: transparent; color: var(--matra); }
-button.quiet:hover { background: var(--matra); color: var(--paper); }
+button.quiet  { background: var(--surface); color: var(--accent); border-color: var(--border); }
+button.quiet:hover  { background: var(--surface-alt); border-color: var(--accent); }
 
-button.danger { background: transparent; color: var(--fail); border-color: var(--fail); }
-button.danger:hover { background: var(--fail); color: var(--paper); }
+button.danger { background: var(--surface); color: var(--bad-text); border-color: var(--border); }
+button.danger:hover { background: var(--bad-bg); border-color: var(--bad-text); }
 
-:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.link { color: var(--matra); font-weight: 600; }
+.link { color: var(--accent); font-weight: 600; }
 
-/* ── Panes ─────────────────────────────────────────────────────────────── */
-.pane-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: 2.5rem;
-}
+/* ── Log ───────────────────────────────────────────────────────────────── */
+h2 { margin: 0 0 0.2rem; font-size: 1rem; font-weight: 600; }
+.hint { margin: 0 0 0.9rem; font-size: 0.82rem; color: var(--muted); }
 
-/* column-reverse pins the scroll to the newest line with no JS. */
 #log {
-  display: flex;
+  display: flex;                /* column-reverse pins scroll to the newest line */
   flex-direction: column-reverse;
-  height: 26rem;
+  height: 22rem;
   overflow-y: auto;
-  background: var(--ink);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 0.9rem 1.1rem;
 }
 
 .logtext {
   margin: 0;
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  line-height: 1.55;
-  color: #C9D4DF;
+  font-family: var(--mono), var(--bn);
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.prose { max-width: 58ch; color: var(--muted); }
-.warn { color: var(--fail); }
+/* Same surface as the log, but sized to its content rather than pinned open. */
+.readout {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem 1.1rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+#log::-webkit-scrollbar { width: 10px; }
+#log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 
 .failure {
   font-family: var(--mono);
-  font-size: 0.85rem;
-  color: var(--fail);
-  margin: 0.9rem 0 0;
+  font-size: 0.82rem;
+  margin: 1rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-sm);
+  background: var(--bad-bg);
+  color: var(--bad-text);
   white-space: pre-wrap;
 }
 
 /* ── Forms ─────────────────────────────────────────────────────────────── */
-.signin { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 1.4rem; }
+.prose { max-width: 62ch; color: var(--muted); margin: 0 0 0.9rem; }
+
+.signin { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .signin label { font-size: 0.85rem; color: var(--muted); width: 100%; }
 
 input, textarea {
   font: inherit;
-  color: var(--ink);
-  background: #FFF;
-  border: 2px solid var(--matra);
-  border-radius: 2px;
-  padding: 0.45rem 0.6rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.65rem;
 }
+input:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(53,91,128,.15); }
 
-.editor { display: flex; flex-direction: column; gap: 0.7rem; padding-top: 1.1rem; }
-.editor textarea { font-family: var(--mono); font-size: 0.9rem; line-height: 1.6; }
+.editor { display: flex; flex-direction: column; gap: 0.7rem; }
+.editor textarea { font-family: var(--mono), var(--bn); font-size: 0.85rem; line-height: 1.7; }
 .editor-actions { display: flex; gap: 1.2rem; align-items: center; }
 
 .notices {
   list-style: none;
-  margin: 0;
-  padding: 0.7rem var(--gutter);
-  background: var(--matra);
-  color: var(--paper);
-  font-size: 0.9rem;
-  margin-left: calc(-1 * var(--gutter));
-  margin-right: calc(-1 * var(--gutter));
+  margin: 1.4rem auto 0;
+  max-width: 1120px;
+  padding: 0.7rem 1rem;
+  background: var(--ok-bg);
+  color: var(--ok-text);
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
 }
 
 code { font-family: var(--mono); font-size: 0.88em; }
 
-/* ── Small screens ─────────────────────────────────────────────────────── */
-@media (max-width: 720px) {
-  :root { --gutter: 1.1rem; }
-  .pane-grid { grid-template-columns: 1fr; }
-  .actions { margin-left: 0; width: 100%; }
-  .beat { height: 60px; }
-  #log { height: 18rem; }
+@media (max-width: 620px) {
+  .card { padding: 1.2rem 1.1rem; }
+  .stats { gap: 0 1.5rem; }
+  .stat-n { font-size: 1.35rem; }
+  #log { height: 16rem; }
+  .beat { height: 44px; }
+  .pill { display: block; margin: 0.5rem 0 0; vertical-align: 0; width: fit-content; }
 }
 
 @media (prefers-reduced-motion: reduce) {

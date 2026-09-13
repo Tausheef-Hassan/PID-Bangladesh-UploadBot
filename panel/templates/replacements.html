@@ -14,38 +14,36 @@
   {% endif %}
 {% endwith %}
 
-<div class="rule rule-top"></div>
-
-<header class="head">
-  <h1>Bengali replacements</h1>
-  <p class="prose">
-    Each line is Bengali text, three pipes, then what to put in its place.
-    These run on OCR output before it reaches the translator, so a fix here
-    changes every future run. Lines starting with <code>#</code> are ignored.
-  </p>
-</header>
-
-<div class="rule"></div>
-
-<section class="pane">
-  {% if signed_in %}
-    <form method="post" class="editor">
-      <label for="text">Replacement rules</label>
-      <textarea id="text" name="text" spellcheck="false" rows="22">{{ text }}</textarea>
-      <div class="editor-actions">
-        <button type="submit">Save replacements</button>
-        <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
-      </div>
-    </form>
-  {% else %}
-    <pre class="logtext">{{ text or 'No replacements defined yet.' }}</pre>
+<main class="wrap">
+  <section class="card">
+    <p class="jobname">pid-bot</p>
+    <h1>Bengali replacements</h1>
     <p class="prose">
-      {% if controls_enabled %}Sign in on the main page to edit these.
-      {% else %}Editing is off until a secret is set in <code>panel.key</code>.{% endif %}
+      One rule per line: the Bengali text, three pipes, then what to put in its
+      place. These run on OCR output before it reaches the translator, so a fix
+      here changes every future run without a rebuild. Lines starting with
+      <code>#</code> are ignored.
     </p>
-    <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
-  {% endif %}
-</section>
+
+    {% if signed_in %}
+      <form method="post" class="editor">
+        <label for="text" class="stat-l">Replacement rules</label>
+        <textarea id="text" name="text" spellcheck="false" rows="18">{{ text }}</textarea>
+        <div class="editor-actions">
+          <button type="submit">Save replacements</button>
+          <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
+        </div>
+      </form>
+    {% else %}
+      <div class="readout"><pre class="logtext">{% if text %}{{ text }}{% else %}No replacements defined yet.{% endif %}</pre></div>
+      <p class="prose" style="margin-top:1rem">
+        {% if controls_enabled %}Sign in on the main page to edit these.
+        {% else %}Editing is off until a secret is set in <code>panel.key</code>.{% endif %}
+      </p>
+      <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
+    {% endif %}
+  </section>
+</main>
 
 </body>
 </html>
