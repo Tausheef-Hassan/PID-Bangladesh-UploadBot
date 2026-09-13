@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block title %}Queue — pid-bot{% endblock %}
+{% block content %}
+
+  <section class="card">
+    <h2>Wayback queue</h2>
+    <p class="hint">Source URLs submitted for archiving but not yet confirmed.</p>
+    <div hx-get="{{ url_for('partial_wayback') }}"
+         hx-trigger="load, every 30s" hx-swap="innerHTML">
+      <p class="hint">Loading…</p>
+    </div>
+  </section>
+
+{% endblock %}

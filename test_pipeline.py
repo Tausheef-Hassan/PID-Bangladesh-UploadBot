@@ -368,10 +368,22 @@ def test_wrong_key_is_refused():
 def test_read_only_views_stay_public():
     with tempfile.TemporaryDirectory() as tmp:
         client = _panel_client(tmp, token="correct-horse")
-        for route in ("/", "/partials/dashboard", "/partials/log", "/healthz"):
+        for route in ("/", "/uploads", "/queue", "/replacements", "/sign-in",
+                      "/partials/dashboard", "/partials/log", "/healthz"):
             assert client.get(route).status_code == 200, route
         assert "Run now" not in client.get("/").get_data(as_text=True), \
             "controls must not render for a signed-out visitor"
+
+
+def test_every_page_carries_the_navbar():
+    """Each area is a real page, not another card bolted onto the dashboard."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        for route in ("/", "/uploads", "/queue", "/replacements"):
+            body = client.get(route).get_data(as_text=True)
+            assert 'class="nav"' in body, f"{route} has no navbar"
+            assert body.count('route active') == 1, \
+                f"{route} did not mark exactly one nav item as current"
 
 
 def test_source_proxy_refuses_hosts_it_does_not_scrape():

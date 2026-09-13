@@ -164,6 +164,17 @@ def requires_token(view):
     return wrapped
 
 
+@app.context_processor
+def nav_state():
+    """Every page renders the navbar, so its state is global context."""
+    return {'signed_in': signed_in(), 'controls_enabled': bool(panel_token())}
+
+
+@app.get('/sign-in')
+def sign_in_page():
+    return render_template('signin.html')
+
+
 @app.post('/sign-in')
 def sign_in():
     expected = panel_token()
@@ -277,8 +288,6 @@ def page_context():
             datetime.now(timezone.utc) - _parse(latest.get('started_at')))
             if latest and _parse(latest.get('started_at')) else ''),
         'ticks': heartbeat(records),
-        'signed_in': signed_in(),
-        'controls_enabled': bool(panel_token()),
     }
 
 
@@ -287,6 +296,16 @@ def page_context():
 @app.get('/')
 def index():
     return render_template('index.html', **page_context())
+
+
+@app.get('/uploads')
+def uploads():
+    return render_template('uploads.html')
+
+
+@app.get('/queue')
+def queue():
+    return render_template('queue.html')
 
 
 @app.get('/partials/dashboard')
@@ -356,9 +375,7 @@ def replacements():
         text = Path(path).read_text(encoding='utf-8')
     except OSError:
         text = ''
-    return render_template('replacements.html', text=text,
-                           signed_in=signed_in(),
-                           controls_enabled=bool(panel_token()))
+    return render_template('replacements.html', text=text)
 
 
 @app.post('/replacements')
@@ -480,8 +497,7 @@ def partial_wayback():
         queue = queue if isinstance(queue, list) else []
     except (OSError, ValueError):
         queue = []
-    return render_template('_wayback.html', queue=queue,
-                           signed_in=signed_in())
+    return render_template('_wayback.html', queue=queue)
 
 
 @app.post('/wayback/retry')

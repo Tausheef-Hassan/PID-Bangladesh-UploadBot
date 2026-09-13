@@ -13,7 +13,7 @@
            hx-target="#detail" hx-swap="innerHTML show:#detail:top">
           <img src="{{ thumb(u.filename, 320) }}" alt="{{ u.filename }}" loading="lazy">
         </a>
-        <figcaption>{{ u.date[:10] or 'undated' }}</figcaption>
+        <figcaption title="{{ u.filename }}">{{ u.filename.rsplit('.', 1)[0] }}</figcaption>
       </figure>
     {% endfor %}
   </div>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}pid-bot{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+<script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="{{ url_for('index') }}">pid-bot</a>
+
+    <div class="routes">
+      {% for endpoint, label in [('index', 'Overview'), ('uploads', 'Uploads'),
+                                 ('queue', 'Queue'), ('replacements', 'Replacements')] %}
+        <a class="route {% if request.endpoint == endpoint %}active{% endif %}"
+           href="{{ url_for(endpoint) }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+
+    <div class="account">
+      {% if not controls_enabled %}
+        <span class="account-pill">read-only</span>
+      {% elif signed_in %}
+        <span class="account-pill">signed in</span>
+        <form method="post" action="{{ url_for('sign_out') }}">
+          <button type="submit" class="quiet small">Sign out</button>
+        </form>
+      {% else %}
+        <a class="route" href="{{ url_for('sign_in_page') }}">Sign in</a>
+      {% endif %}
+    </div>
+  </div>
+</nav>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <div class="wrap"><ul class="notices">
+      {% for m in messages %}<li>{{ m }}</li>{% endfor %}
+    </ul></div>
+  {% endif %}
+{% endwith %}
+
+<main class="wrap">
+{% block content %}{% endblock %}
+</main>
+
+</body>
+</html>

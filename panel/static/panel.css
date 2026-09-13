@@ -291,7 +291,17 @@ code { font-family: var(--mono); font-size: 0.88em; }
 .shot a { display: block; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); background: var(--surface-alt); }
 .shot img { display: block; width: 100%; height: 130px; object-fit: cover; }
 .shot a:hover { border-color: var(--accent); }
-.shot figcaption { font-size: 0.75rem; color: var(--muted); padding-top: 0.35rem; }
+/* Two lines of title, then ellipsis; the full name is in the tooltip. */
+.shot figcaption {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--muted);
+  padding-top: 0.4rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* Side by side while there is room, stacked when there is not. */
 .compare {
@@ -311,3 +321,72 @@ code { font-family: var(--mono); font-size: 0.88em; }
 .compare figcaption { font-size: 0.8rem; color: var(--muted); padding-top: 0.4rem; }
 
 .bn { font-family: var(--bn), var(--sans); font-size: 1rem; line-height: 1.75; margin: 0.2rem 0 0; }
+
+/* ── Navbar ────────────────────────────────────────────────────────────────
+   White translucent shell, pale active route, compact account pill. */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(255, 255, 255, .82);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-inner {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  height: 56px;
+  padding: 0 var(--gutter);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.routes { display: flex; gap: 0.2rem; }
+
+.route {
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+.route:hover { background: var(--surface-alt); color: var(--text); }
+.route.active { background: var(--surface-alt); color: var(--accent); }
+
+.account { display: flex; align-items: center; gap: 0.6rem; margin-left: auto; }
+.account form { margin: 0; }
+
+.account-pill {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+}
+
+button.small { font-size: 0.82rem; padding: 0.3rem 0.75rem; }
+
+main.wrap { padding-top: 0.2rem; }
+
+/* Small screens: the guide hides secondary navigation, but these are the
+   primary routes and hiding them would strand Uploads and Queue with no way
+   back. They scroll horizontally instead; the account controls stay put. */
+@media (max-width: 620px) {
+  .nav-inner { gap: 0.7rem; }
+  .routes { overflow-x: auto; scrollbar-width: none; flex: 1 1 auto; }
+  .routes::-webkit-scrollbar { display: none; }
+  .route { padding: 0.35rem 0.55rem; white-space: nowrap; }
+  .account { margin-left: 0; }
+  .account-pill { display: none; }
+}

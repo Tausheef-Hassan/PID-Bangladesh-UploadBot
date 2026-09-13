@@ -1,23 +1,9 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bengali replacements — pid-bot</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
-</head>
-<body>
+{% extends 'base.html' %}
+{% block title %}Replacements — pid-bot{% endblock %}
+{% block content %}
 
-{% with messages = get_flashed_messages() %}
-  {% if messages %}
-    <ul class="notices">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
-  {% endif %}
-{% endwith %}
-
-<main class="wrap">
   <section class="card">
-    <p class="jobname">pid-bot</p>
-    <h1>Bengali replacements</h1>
+    <h2>Bengali replacements</h2>
     <p class="prose">
       One rule per line: the Bengali text, three pipes, then what to put in its
       place. These run on OCR output before it reaches the translator, so a fix
@@ -31,19 +17,15 @@
         <textarea id="text" name="text" spellcheck="false" rows="18">{{ text }}</textarea>
         <div class="editor-actions">
           <button type="submit">Save replacements</button>
-          <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
         </div>
       </form>
     {% else %}
       <div class="readout"><pre class="logtext">{% if text %}{{ text }}{% else %}No replacements defined yet.{% endif %}</pre></div>
-      <p class="prose" style="margin-top:1rem">
-        {% if controls_enabled %}Sign in on the main page to edit these.
+      <p class="hint" style="margin-top:1rem">
+        {% if controls_enabled %}Sign in to edit these.
         {% else %}Editing is off until a secret is set in <code>panel.key</code>.{% endif %}
       </p>
-      <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
     {% endif %}
   </section>
-</main>
 
-</body>
-</html>
+{% endblock %}

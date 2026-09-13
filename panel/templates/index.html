@@ -1,21 +1,6 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pid-bot</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
-<script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
-</head>
-<body>
-
-{% with messages = get_flashed_messages() %}
-  {% if messages %}
-    <ul class="notices">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
-  {% endif %}
-{% endwith %}
-
-<main class="wrap">
+{% extends 'base.html' %}
+{% block title %}Overview — pid-bot{% endblock %}
+{% block content %}
 
   <div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
        hx-trigger="every 5s" hx-swap="outerHTML">
@@ -31,64 +16,4 @@
     </div>
   </section>
 
-  <section class="card">
-    <h2>Recent uploads</h2>
-    <p class="hint">Pulled from the bot's own record on Commons. Refreshes every minute.</p>
-    <div hx-get="{{ url_for('partial_gallery') }}"
-         hx-trigger="load, every 60s" hx-swap="innerHTML">
-      <p class="hint">Loading…</p>
-    </div>
-  </section>
-
-  <section class="card" id="detail">
-    <h2>Image detail</h2>
-    <p class="hint">Pick an upload above to compare it against the original and
-      see the text the bot read off it.</p>
-  </section>
-
-  <section class="card">
-    <h2>Wayback queue</h2>
-    <div hx-get="{{ url_for('partial_wayback') }}"
-         hx-trigger="load, every 30s" hx-swap="innerHTML">
-      <p class="hint">Loading…</p>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>Bengali replacements</h2>
-    <p class="prose">
-      These are applied to OCR text before it reaches the translator, so fixing
-      one here changes every future run without a rebuild.
-    </p>
-    <a class="link" href="{{ url_for('replacements') }}">Open the replacement list</a>
-  </section>
-
-  <section class="card">
-    {% if controls_enabled %}
-      {% if signed_in %}
-        <h2>Signed in</h2>
-        <p class="prose">The controls above are unlocked for this browser.</p>
-        <form method="post" action="{{ url_for('sign_out') }}" class="signin">
-          <button type="submit" class="quiet">Sign out</button>
-        </form>
-      {% else %}
-        <h2>Sign in to use the controls</h2>
-        <p class="prose">Running, pausing and stopping the job need the panel key.</p>
-        <form method="post" action="{{ url_for('sign_in') }}" class="signin">
-          <label for="token">Panel key</label>
-          <input id="token" name="token" type="password" autocomplete="current-password">
-          <button type="submit">Sign in</button>
-        </form>
-      {% endif %}
-    {% else %}
-      <h2>Controls are off</h2>
-      <p class="prose">
-        Add a secret to <code>panel.key</code> in the tool's data directory to
-        turn on Run, Pause and Stop. Until then this page is read-only.
-      </p>
-    {% endif %}
-  </section>
-
-</main>
-</body>
-</html>
+{% endblock %}
