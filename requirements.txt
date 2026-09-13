@@ -18,3 +18,5 @@ gunicorn
 toolforge-weld     # Wikimedia's own Toolforge API client: certs, retries, errors
 humanize
 croniter
+mwoauth             # Wikimedia OAuth handshake, so edits are attributed to a person
+requests-oauthlib

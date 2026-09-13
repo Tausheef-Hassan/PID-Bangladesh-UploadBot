@@ -32,6 +32,14 @@
       {% else %}
         <a class="route" href="{{ url_for('sign_in_page') }}">Sign in</a>
       {% endif %}
+      {% if wiki_user %}
+        <span class="account-pill">{{ wiki_user }}</span>
+        <form method="post" action="{{ url_for('oauth_logout') }}">
+          <button type="submit" class="quiet small">Disconnect Commons</button>
+        </form>
+      {% elif wiki_configured %}
+        <a class="route" href="{{ url_for('oauth_start') }}">Connect Commons</a>
+      {% endif %}
     </div>
   </div>
 </nav>

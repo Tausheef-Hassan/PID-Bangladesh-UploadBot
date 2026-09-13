@@ -25,7 +25,7 @@ from toolforge_weld.api_client import ToolforgeClient
 from toolforge_weld.kubernetes_config import Kubeconfig
 
 import config
-from panel import commons
+from panel import commons, wikiauth, wikitext
 from src import run_state, wayback
 
 API_SERVER = 'https://api.svc.tools.eqiad1.wikimedia.cloud:30003/jobs/v1'
@@ -168,7 +168,55 @@ def requires_token(view):
 @app.context_processor
 def nav_state():
     """Every page renders the navbar, so its state is global context."""
-    return {'signed_in': signed_in(), 'controls_enabled': bool(panel_token())}
+    return {'signed_in': signed_in(),
+            'controls_enabled': bool(panel_token()),
+            'wiki_user': session.get('wiki_user'),
+            'wiki_configured': wikiauth.consumer() is not None}
+
+
+# ── Wikimedia OAuth ───────────────────────────────────────────────────────────
+#
+# Job controls are gated by panel.key: that is operating the tool's own
+# infrastructure. Commons edits are gated by OAuth instead, because they are
+# published under a person's name and should carry that person's identity.
+
+@app.get('/oauth/start')
+def oauth_start():
+    try:
+        redirect_url, request_token = wikiauth.start(
+            url_for('oauth_callback', _external=True))
+    except Exception as e:
+        flash(str(e))
+        return redirect(url_for('index'))
+    session['wiki_request_token'] = request_token
+    return redirect(redirect_url)
+
+
+@app.get('/oauth/callback')
+def oauth_callback():
+    request_token = session.pop('wiki_request_token', None)
+    if not request_token:
+        flash('That sign-in attempt expired. Try again.')
+        return redirect(url_for('index'))
+    try:
+        access_token, username = wikiauth.finish(
+            tuple(request_token), request.query_string.decode())
+    except Exception as e:
+        app.logger.warning('OAuth handshake failed: %r', e)
+        flash('Wikimedia sign-in failed. Try again.')
+        return redirect(url_for('index'))
+
+    session['wiki_token'] = access_token
+    session['wiki_user'] = username
+    flash(f'Signed in to Commons as {username}.')
+    return redirect(request.args.get('next') or url_for('uploads'))
+
+
+@app.post('/oauth/logout')
+def oauth_logout():
+    session.pop('wiki_token', None)
+    session.pop('wiki_user', None)
+    return redirect(url_for('uploads'))
 
 
 @app.get('/sign-in')
@@ -483,9 +531,23 @@ def upload_detail(unique_id):
     if not record:
         abort(404, 'No upload recorded with that id.')
     # htmx asks for the fragment; a plain click (or no JS) gets a whole page.
+    page = wikiauth.fetch_wikitext(f"File:{record['filename']}")
+    english, auto_translated, categories, parse_error = '', True, [], ''
+    if page is None:
+        parse_error = "Couldn't read the page from Commons."
+    else:
+        try:
+            english, auto_translated = wikitext.read_english(page)
+            categories = wikitext.read_categories(page)
+        except wikitext.Unparseable as e:
+            parse_error = f'This page is not in the shape the bot writes ({e}), so it is not editable here.'
+
     template = '_detail.html' if request.headers.get('HX-Request') else 'detail.html'
     return render_template(template, record=record,
                            detail=commons.detail_for(unique_id),
+                           english=english, auto_translated=auto_translated,
+                           categories="\n".join(categories),
+                           parse_error=parse_error,
                            thumb=commons.thumb_url,
                            filepage=commons.file_page_url)
 
@@ -511,6 +573,54 @@ def _archived_copy(url, bucket):
         return closest.get('url') or ''
     except Exception:
         return ''
+
+
+@app.post('/upload/<unique_id>')
+def save_description(unique_id):
+    """Apply an edited description and categories to the file page.
+
+    Only files the bot recorded in PIDDateData can be edited here — the panel
+    must not become a general-purpose Commons editor — and only as the person
+    who signed in with OAuth.
+    """
+    record = commons.find_upload(unique_id)
+    if not record:
+        abort(404, 'No upload recorded with that id.')
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    title = f"File:{record['filename']}"
+    page = wikiauth.fetch_wikitext(title)
+    if page is None:
+        flash("Couldn't read that page from Commons; nothing was changed.")
+        return redirect(url_for('upload_detail', unique_id=unique_id))
+
+    try:
+        updated = wikitext.write_english(
+            page,
+            request.form.get('english', ''),
+            mark_auto_translated=request.form.get('reviewed') != 'on')
+        updated = wikitext.write_categories(
+            updated, request.form.get('categories', '').splitlines())
+    except wikitext.Unparseable as e:
+        flash(f'Not saved: {e}')
+        return redirect(url_for('upload_detail', unique_id=unique_id))
+
+    if updated == page:
+        flash('No change to save.')
+        return redirect(url_for('upload_detail', unique_id=unique_id))
+
+    try:
+        wikiauth.edit_description(
+            tuple(token), title, updated,
+            'Reviewed the auto-translated description via the PID control panel')
+    except Exception as e:
+        flash(f'Commons refused the edit: {e}')
+        return redirect(url_for('upload_detail', unique_id=unique_id))
+
+    flash('Saved to Commons.')
+    return redirect(url_for('upload_detail', unique_id=unique_id))
 
 
 @app.get('/source-image')

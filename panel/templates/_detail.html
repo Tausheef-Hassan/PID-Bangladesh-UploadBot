@@ -20,13 +20,49 @@
   part of the photograph, the separator was found in the wrong place.
 </p>
 
-{% if detail %}
+{% if detail and detail.ocr_text %}
   <div class="readout" style="margin-top:1rem">
-    <p class="stat-l">Text read from the image</p>
-    <p class="bn">{{ detail.ocr_text or '—' }}</p>
-    <p class="stat-l" style="margin-top:0.9rem">Translation used for the description</p>
-    <p>{{ detail.translation or '—' }}</p>
+    <p class="stat-l">Bengali the OCR read</p>
+    <p class="bn">{{ detail.ocr_text }}</p>
   </div>
+{% endif %}
+
+<h3 class="edithead">Description on Commons</h3>
+
+{% if parse_error %}
+  <p class="aside compact">{{ parse_error }}</p>
+{% elif not wiki_configured %}
+  <p class="aside compact">Wikimedia sign-in is not set up on this tool, so
+    descriptions can only be edited on Commons itself.</p>
+{% elif not wiki_user %}
+  <p class="hint">
+    <a class="link" href="{{ url_for('oauth_start') }}">Sign in with your Wikimedia account</a>
+    to correct this description. Edits are saved under your name, not the bot's.
+  </p>
+  <div class="readout"><p>{{ english }}</p></div>
 {% else %}
-  <p class="hint">No logged detail for this image — the daily log only goes back a few days.</p>
+  <form method="post" action="{{ url_for('save_description', unique_id=record.unique_id) }}"
+        class="editor">
+    <label for="english" class="stat-l">English description</label>
+    <textarea id="english" name="english" rows="6">{{ english }}</textarea>
+
+    <label class="check">
+      <input type="checkbox" name="reviewed" {% if not auto_translated %}checked{% endif %}>
+      I have checked this against the Bengali — drop the
+      <code>{{ '{{Auto-translated PID English description}}' }}</code> marker
+    </label>
+
+    <label for="categories" class="stat-l">Topic categories, one per line</label>
+    <textarea id="categories" name="categories" rows="4"
+              placeholder="Zubaida Rahman&#10;Bangladesh Innovation Fair 2026">{{ categories }}</textarea>
+    <p class="hint">
+      Date and PID maintenance categories are added by the templates and are
+      not listed here — adding them by hand would duplicate them.
+    </p>
+
+    <div class="editor-actions">
+      <button type="submit">Save to Commons as {{ wiki_user }}</button>
+      <a class="link" href="{{ filepage(record.filename) }}">Open on Commons</a>
+    </div>
+  </form>
 {% endif %}

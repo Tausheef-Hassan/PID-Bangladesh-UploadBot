@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from src import commons_log, run_state, translator, wayback
-from panel import app as panel_app
+from panel import app as panel_app, wikitext
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -441,6 +441,92 @@ def test_log_survives_a_missing_file():
         config.CREDS_DIR = tmp
         lines, total = panel_app.log_lines()
         assert lines == [] or all(not l["text"] for l in lines), lines
+
+
+# ── 6. Commons description editing ────────────────────────────────────────────
+
+PAGE = """=={{int:filedesc}}==
+{{Information
+ |description = {{bn|1=আজ ঢাকায় সভা।}}{{en|1=A meeting in Dhaka today.\
+{{Auto-translated PID English description}}}}
+ |date = {{Date-PID|2026-09-13 15:18:00}}
+ |source = {{Source-PID | url=https://example.org/a.jpg}}
+ |author = {{Institution:Press Information Department}}
+ |permission =
+ |other versions =
+}}
+=={{int:license-header}}==
+{{PD-BDGov-PID}}
+[[Category: Uploaded with pypan]]
+[[Category:Some topic]]
+"""
+
+
+def test_reads_english_without_the_marker():
+    english, marked = wikitext.read_english(PAGE)
+    assert english == "A meeting in Dhaka today.", repr(english)
+    assert marked is True
+    assert wikitext.MARKER not in english
+
+
+def test_editing_english_leaves_everything_else_alone():
+    updated = wikitext.write_english(PAGE, "A cabinet meeting in Dhaka.", False)
+    english, marked = wikitext.read_english(updated)
+
+    assert english == "A cabinet meeting in Dhaka."
+    assert marked is False, "reviewing must drop the auto-translated marker"
+    # The Bengali, the date, the source and the licence are not ours to touch.
+    for fragment in ("আজ ঢাকায় সভা।",
+                     "Date-PID|2026-09-13", "Source-PID", "PD-BDGov-PID"):
+        assert fragment in updated, fragment
+
+
+def test_marker_can_be_put_back():
+    once = wikitext.write_english(PAGE, "Rewritten.", False)
+    twice = wikitext.write_english(once, "Rewritten.", True)
+    assert wikitext.read_english(twice) == ("Rewritten.", True)
+
+
+def test_refuses_to_mangle_a_page_it_cannot_parse():
+    """Writing a broken description to Commons is worse than refusing."""
+    for bad_page in ("no templates here", "{{en|1=unclosed", ""):
+        try:
+            wikitext.read_english(bad_page)
+        except wikitext.Unparseable:
+            continue
+        raise AssertionError(f"parsed nonsense: {bad_page!r}")
+
+
+def test_refuses_braces_and_empty_descriptions():
+    for bad in ("", "   ", "text with {{a template}}"):
+        try:
+            wikitext.write_english(PAGE, bad, False)
+        except wikitext.Unparseable:
+            continue
+        raise AssertionError(f"accepted dangerous description: {bad!r}")
+
+
+def test_categories_separate_topic_from_automatic():
+    assert wikitext.read_categories(PAGE) == ["Some topic"], \
+        "template-driven categories must not look hand-editable"
+
+
+def test_writing_categories_keeps_the_automatic_ones():
+    updated = wikitext.write_categories(
+        PAGE, ["Zubaida Rahman", "  Category:Novo Theatre  ", "", "Zubaida Rahman"])
+
+    assert "[[Category: Uploaded with pypan]]" in updated, "automatic category dropped"
+    assert wikitext.read_categories(updated) == ["Zubaida Rahman", "Novo Theatre"], \
+        "expected de-duplication and the Category: prefix stripped"
+    assert "Some topic" not in updated, "replaced topic category still present"
+
+
+def test_category_names_cannot_smuggle_markup():
+    try:
+        wikitext.write_categories(PAGE, ["Fine", "Bad]]{{Delete}}"])
+    except wikitext.Unparseable:
+        return
+    raise AssertionError("category markup injection was accepted")
 
 
 def test_every_page_carries_the_navbar():

@@ -564,3 +564,6 @@ main.wrap { padding-top: 0.2rem; }
   .controls { margin-left: 0; width: 100%; }
   .statusbar { gap: 0.4rem; }
 }
+
+.edithead { margin: 1.4rem 0 0.6rem; font-size: 0.95rem; font-weight: 600; }
+.editor .check { margin: 0.1rem 0; white-space: normal; }

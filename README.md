@@ -329,6 +329,42 @@ the schedule to a date that never arrives (31 February), leaving the job
 definition and any in-flight run untouched. The Stop button says all this before
 you press it.
 
+### Reviewing descriptions from the panel
+
+Each upload's detail view can correct the English description and add topic
+categories on Commons. The bot writes
+`{{en|1=<translation>{{Auto-translated PID English description}}}}`; ticking
+"I have checked this against the Bengali" removes that marker, because once a
+person has verified it, it is no longer auto-translated.
+
+Maintenance categories are **not** editable here and are not shown: `{{Date-PID}}`
+and `{{PD-BDGov-PID}}` call `Module:PIDCategoryHelper` and add
+`Category:PID-BD images from <Month Year>` and
+`Category:Bangladesh photographs taken on <date>` themselves. Only topic
+categories are hand-managed.
+
+Edits are attributed to **you**, not the bot, through Wikimedia OAuth. Set it up
+once:
+
+1. Propose a consumer at
+   [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose)
+   with callback `https://<tool>.toolforge.org/oauth/callback` and the grant
+   **Edit existing pages** — nothing more is needed.
+2. Once approved, write the consumer to `$TOOL_DATA_DIR/oauth.key`:
+   ```
+   OAUTH_CONSUMER_KEY=...
+   OAUTH_CONSUMER_SECRET=...
+   ```
+   `chmod 600` it; `*.key` is already gitignored.
+
+Without `oauth.key` the panel stays read-only for Commons and says so, rather
+than falling back to the bot's own credentials.
+
+`panel/wikitext.py` rewrites the page by counting braces, never by pattern
+matching — `{{en|1=…}}` contains nested templates. It refuses to save anything
+it cannot parse confidently, and rejects descriptions or category names
+containing markup: leaving a page alone always beats writing a mangled one.
+
 **Auth:** reads are public; every write requires a secret stored in `panel.key`
 in `$TOOL_DATA_DIR` (same pattern as `gemini.key` and `ia.key`, and `*.key` is
 already gitignored). **No `panel.key` means the controls are disabled, not open.**
