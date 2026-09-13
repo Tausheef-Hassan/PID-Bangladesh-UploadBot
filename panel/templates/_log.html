@@ -1,1 +1,18 @@
-<pre class="logtext">{% if log %}{{ log }}{% else %}Nothing logged yet. Output appears here once the job has run at least once.{% endif %}</pre>
+{# #log is the scroller; the meta line sits outside it, or column-reverse would
+   flip it above the output. When filtering, reading starts at the top rather
+   than tailing from the bottom, so the scroller flips back. #}
+<div id="log" class="{% if query or errors_only %}reading{% endif %}">
+  {% if not lines %}
+    <p class="hint logempty">
+      {% if query or errors_only %}No line in the last {{ total }} matches.
+      {% else %}Nothing logged yet. Output appears once the job has run.{% endif %}
+    </p>
+  {% else %}
+    <pre class="logtext">{% for l in lines %}<span class="ln {{ l.kind }}">{{ l.text }}</span>{% endfor %}</pre>
+  {% endif %}
+</div>
+
+<p class="logmeta">
+  showing {{ lines|length }} of {{ total }} lines
+  {% if live %}· updated {{ updated }}{% else %}· frozen{% endif %}
+</p>

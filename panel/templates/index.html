@@ -9,9 +9,14 @@
 
   <section class="card">
     <h2>Live log</h2>
-    <p class="hint">The job's output, newest at the bottom. Refreshes every few seconds.</p>
-    <div id="log" hx-get="{{ url_for('partial_log') }}"
-         hx-trigger="every 3s" hx-swap="innerHTML">
+    <p class="hint">The job's output, newest at the bottom.</p>
+
+    {% include '_logtools.html' %}
+
+    <div id="logwrap"
+         hx-get="{{ log_url }}"
+         {% if live %}hx-trigger="every 3s"{% endif %}
+         hx-swap="innerHTML">
       {% include '_log.html' %}
     </div>
   </section>

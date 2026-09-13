@@ -7,6 +7,7 @@
 
 import functools
 import hashlib
+import re
 import json
 import os
 import secrets
@@ -195,13 +196,22 @@ def sign_out():
 
 # ── Reading what the bot leaves behind ────────────────────────────────────────
 
-def tail_log():
-    """Last chunk of the job's stdout, written by `filelog: true`.
+# Lines worth picking out of a wall of scrolling output.
+TROUBLE = re.compile(
+    r'error|failed|failure|traceback|exception|exhausted|429|timed out|'
+    r'giving up|no separator|warning', re.I)
+GOOD = re.compile(r'upload successful|succeeded|success|confirmed|created', re.I)
+HEADING = re.compile(r'^(=+$|STEP |Processing row |Batch updating|PROCESSING)')
 
-    Reads the file rather than the API's log endpoint: the file outlives the pod,
-    so the log survives between hourly runs.
+
+def read_log(stream='out'):
+    """Tail of the job's output, written by `filelog: true`.
+
+    Reads the file rather than the API's log endpoint: the file outlives the
+    pod, so the log survives between hourly runs.
     """
-    path = os.path.join(config.CREDS_DIR, f'{config.JOB_NAME}.out')
+    suffix = 'err' if stream == 'err' else 'out'
+    path = os.path.join(config.CREDS_DIR, f'{config.JOB_NAME}.{suffix}')
     try:
         size = os.path.getsize(path)
         with open(path, 'rb') as f:
@@ -212,6 +222,29 @@ def tail_log():
     text = raw.decode('utf-8', errors='replace')
     # Drop the leading partial line when the seek landed mid-line.
     return text.split('\n', 1)[-1] if size > LOG_TAIL_BYTES else text
+
+
+def log_lines(stream='out', query='', errors_only=False):
+    """Tail split into classified lines, filtered. Returns (lines, total)."""
+    everything = read_log(stream).split('\n')
+    total = len(everything)
+
+    kept = []
+    for line in everything:
+        if errors_only and not TROUBLE.search(line):
+            continue
+        if query and query.lower() not in line.lower():
+            continue
+        if TROUBLE.search(line):
+            kind = 'bad'
+        elif GOOD.search(line):
+            kind = 'good'
+        elif HEADING.match(line):
+            kind = 'head'
+        else:
+            kind = ''
+        kept.append({'text': line, 'kind': kind})
+    return kept, total
 
 
 def _parse(iso):
@@ -295,7 +328,17 @@ def page_context():
 
 @app.get('/')
 def index():
-    return render_template('index.html', **page_context())
+    view = _log_view()
+    lines, total = log_lines(view['stream'], view['query'], view['errors_only'])
+    return render_template(
+        'index.html', lines=lines, total=total,
+        updated=datetime.now().strftime('%H:%M:%S'),
+        # htmx polls this URL, so the filters must travel with it.
+        log_url=url_for('partial_log', stream=view['stream'],
+                        q=view['query'] or None,
+                        level='errors' if view['errors_only'] else None,
+                        live=None if view['live'] else '0'),
+        **view, **page_context())
 
 
 @app.get('/uploads')
@@ -314,9 +357,29 @@ def partial_dashboard():
     return render_template('_dashboard.html', **page_context())
 
 
+def _log_view():
+    """Filter state shared by the log partial and the raw download."""
+    return {
+        'stream': 'err' if request.args.get('stream') == 'err' else 'out',
+        'query': request.args.get('q', '').strip(),
+        'errors_only': request.args.get('level') == 'errors',
+        'live': request.args.get('live') != '0',
+    }
+
+
 @app.get('/partials/log')
 def partial_log():
-    return render_template('_log.html', log=tail_log())
+    view = _log_view()
+    lines, total = log_lines(view['stream'], view['query'], view['errors_only'])
+    return render_template('_log.html', lines=lines, total=total,
+                           updated=datetime.now().strftime('%H:%M:%S'), **view)
+
+
+@app.get('/log.txt')
+def log_download():
+    """The raw tail, for grepping somewhere more comfortable than a browser."""
+    view = _log_view()
+    return Response(read_log(view['stream']), mimetype='text/plain; charset=utf-8')
 
 
 # ── Controls ──────────────────────────────────────────────────────────────────

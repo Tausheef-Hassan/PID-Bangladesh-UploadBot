@@ -375,6 +375,74 @@ def test_read_only_views_stay_public():
             "controls must not render for a signed-out visitor"
 
 
+def _seed_log(tmp, text, suffix="out"):
+    config.CREDS_DIR = tmp
+    with open(os.path.join(tmp, f"{config.JOB_NAME}.{suffix}"), "w",
+              encoding="utf-8") as f:
+        f.write(text)
+
+
+LOG_SAMPLE = (
+    "STEP 2: Processing image...\n"
+    "Row 1: Upload successful\n"
+    "Row 2: Retryable error on AI Studio primary: 429 RESOURCE_EXHAUSTED\n"
+    "Sanitized OCR Data: বাংলা টেক্সট\n"
+)
+
+
+def test_log_classifies_trouble_and_success():
+    """A wall of output is unreadable until the bad lines stand out."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_log(tmp, LOG_SAMPLE)
+        lines, total = panel_app.log_lines()
+
+        def kind_of(fragment):
+            for line in lines:
+                if fragment in line["text"]:
+                    return line["kind"]
+            raise AssertionError(f"{fragment!r} missing from {lines}")
+
+        assert total >= 4
+        assert kind_of("RESOURCE_EXHAUSTED") == "bad"
+        assert kind_of("Upload successful") == "good"
+        assert kind_of("STEP 2") == "head"
+        assert kind_of("বাংলা") == "", "ordinary lines must not be coloured"
+
+
+def test_log_filters_by_search_and_by_problems():
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_log(tmp, LOG_SAMPLE)
+
+        found, _ = panel_app.log_lines(query="row 1")
+        assert len(found) == 1 and "Upload successful" in found[0]["text"], found
+        assert panel_app.log_lines(query="ROW 1")[0], "search must ignore case"
+
+        problems, total = panel_app.log_lines(errors_only=True)
+        assert len(problems) == 1, problems
+        assert "429" in problems[0]["text"]
+        assert total >= 4, "total must count the whole tail, not the filtered set"
+
+
+def test_log_reads_the_error_stream_separately():
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_log(tmp, "stdout line\n")
+        _seed_log(tmp, "Traceback (most recent call last):\n", suffix="err")
+
+        out, _ = panel_app.log_lines(stream="out")
+        err, _ = panel_app.log_lines(stream="err")
+        assert any("stdout line" in l["text"] for l in out)
+        assert any("Traceback" in l["text"] for l in err), err
+        assert not any("Traceback" in l["text"] for l in out)
+
+
+def test_log_survives_a_missing_file():
+    """The panel comes up before the job has ever run."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config.CREDS_DIR = tmp
+        lines, total = panel_app.log_lines()
+        assert lines == [] or all(not l["text"] for l in lines), lines
+
+
 def test_every_page_carries_the_navbar():
     """Each area is a real page, not another card bolted onto the dashboard."""
     with tempfile.TemporaryDirectory() as tmp:

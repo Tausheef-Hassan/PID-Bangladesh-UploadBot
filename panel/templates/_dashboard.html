@@ -45,26 +45,6 @@
       <p class="failure">{{ latest.error }}</p>
     {% endif %}
 
-    {% if signed_in %}
-      <div class="actions">
-        <form method="post" action="{{ url_for('run_now') }}">
-          <button type="submit">Run now</button>
-        </form>
-        {% if paused %}
-          <form method="post" action="{{ url_for('resume') }}">
-            <button type="submit" class="quiet">Resume schedule</button>
-          </form>
-        {% else %}
-          <form method="post" action="{{ url_for('pause') }}">
-            <button type="submit" class="quiet">Pause schedule</button>
-          </form>
-        {% endif %}
-        <form method="post" action="{{ url_for('stop') }}"
-              onsubmit="return confirm('Stop the job and kill the running pod?\n\nUploads already made in this run are not yet recorded in PIDDateData — that write happens once, at the end. Killing now means those images are downloaded, OCR'd and translated again next run, then rejected as duplicates.\n\nTo quiet the bot without losing work, use Pause schedule instead.')">
-          <button type="submit" class="danger">Stop job</button>
-        </form>
-      </div>
-    {% endif %}
   </section>
 
   <section class="card">
