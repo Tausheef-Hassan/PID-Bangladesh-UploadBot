@@ -1,4 +1,4 @@
-{# Compact status strip: this is the terminal's header, not a page hero. #}
+{# Terminal header. Everything that fits on a line shares one. #}
 <div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
      hx-trigger="every 5s" hx-swap="outerHTML">
 
@@ -14,33 +14,45 @@
       {% if paused %}— schedule paused
       {% elif next_in %}— next in {{ next_in }}{% endif %}
     </span>
+
+    {% if signed_in %}
+      <span class="controls">
+        <form method="post" action="{{ url_for('run_now') }}">
+          <button type="submit">Run now</button>
+        </form>
+        {% if paused %}
+          <form method="post" action="{{ url_for('resume') }}">
+            <button type="submit" class="quiet">Resume schedule</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('pause') }}">
+            <button type="submit" class="quiet">Pause schedule</button>
+          </form>
+        {% endif %}
+        <form method="post" action="{{ url_for('stop') }}"
+              onsubmit="return confirm('Stop the job and kill the running pod?\n\nUploads already made in this run are not yet recorded in PIDDateData — that write happens once, at the end. Killing now means those images are downloaded, OCR'd and translated again next run, then rejected as duplicates.\n\nTo quiet the bot without losing work, use Pause schedule instead.')">
+          <button type="submit" class="danger">Stop job</button>
+        </form>
+      </span>
+    {% else %}
+      <span class="controls">
+        <a class="route" href="{{ url_for('sign_in_page') }}">Sign in to run the job</a>
+      </span>
+    {% endif %}
   </div>
 
-  {% if latest %}
-    <div class="stats tight">
-      <div class="stat">
-        <span class="stat-n {% if not latest.uploaded %}is-zero{% endif %}">{{ latest.uploaded }}</span>
-        <span class="stat-l">uploaded</span>
-      </div>
-      <div class="stat">
-        <span class="stat-n {% if not latest.duplicates %}is-zero{% endif %}">{{ latest.duplicates }}</span>
-        <span class="stat-l">already on Commons</span>
-      </div>
-      <div class="stat">
-        <span class="stat-n {% if latest.failed %}is-alert{% else %}is-zero{% endif %}">{{ latest.failed }}</span>
-        <span class="stat-l">failed</span>
-      </div>
-      <div class="stat">
-        <span class="stat-n {% if not latest.scraped %}is-zero{% endif %}">{{ latest.scraped }}</span>
-        <span class="stat-l">images seen</span>
-      </div>
-    </div>
-  {% endif %}
-
-  {% if not api_reachable %}
-    <p class="aside compact">Showing the bot's own records. The Jobs API is
-      unreachable, so the controls won't work until it's back.</p>
-  {% endif %}
+  <div class="countbar">
+    {% if latest %}
+      <span class="count"><b class="{% if not latest.uploaded %}is-zero{% endif %}">{{ latest.uploaded }}</b> uploaded</span>
+      <span class="count"><b class="{% if not latest.duplicates %}is-zero{% endif %}">{{ latest.duplicates }}</b> already on Commons</span>
+      <span class="count"><b class="{% if latest.failed %}is-alert{% else %}is-zero{% endif %}">{{ latest.failed }}</b> failed</span>
+      <span class="count"><b class="{% if not latest.scraped %}is-zero{% endif %}">{{ latest.scraped }}</b> images seen</span>
+    {% endif %}
+    {% if not api_reachable %}
+      <span class="inline-warn">Jobs API unreachable — these are the bot's own
+        records, and the controls won't act until it's back.</span>
+    {% endif %}
+  </div>
 
   {% if latest and latest.error %}
     <p class="failure">{{ latest.error }}</p>

@@ -194,7 +194,7 @@ h2 { margin: 0 0 0.2rem; font-size: 1rem; font-weight: 600; }
   display: flex;                /* column-reverse pins scroll to the newest line */
   flex-direction: column-reverse;
   scroll-behavior: smooth;
-  height: 22rem;
+  height: clamp(18rem, 56vh, 44rem);   /* fill the space the header gave back */
   overflow-y: auto;
   background: var(--surface-alt);
   border: 1px solid var(--border);
@@ -449,26 +449,26 @@ main.wrap { padding-top: 0.2rem; }
 .ln.head { color: var(--accent); font-weight: 600; }
 
 /* ── Terminal header ───────────────────────────────────────────────────────
-   Status folded onto the log: the numbers and the output they describe are
-   one thing, not two cards. */
-.card.terminal { padding-top: 1.2rem; }
+   Status folded onto the log, and everything that fits on a line shares one.
+   The controls sit right, where a full-width card otherwise wastes the space. */
+.card.terminal { padding: 1.1rem 1.4rem 1.3rem; }
 
 .statusbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 0.55rem;
-  margin-bottom: 0.8rem;
+  margin-bottom: 0.55rem;
 }
 
 .statusbar .jobname {
   margin: 0;
-  padding-right: 0.5rem;
+  padding-right: 0.6rem;
   border-right: 1px solid var(--border);
 }
 
 .statusbar .state {
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   margin: 0;
@@ -477,9 +477,90 @@ main.wrap { padding-top: 0.2rem; }
 
 .statusmeta { font-size: 0.85rem; color: var(--muted); }
 
-/* Denser than the standalone stat row it replaced. */
-.stats.tight { margin-top: 0; margin-bottom: 0.9rem; gap: 0 2rem; }
-.stats.tight .stat-n { font-size: 1.25rem; }
-.stats.tight .stat-l { font-size: 0.76rem; }
+.controls { display: flex; gap: 0.45rem; margin-left: auto; }
+.controls form { margin: 0; }
 
-.aside.compact { margin: 0 0 0.9rem; font-size: 0.84rem; }
+/* Counts read as a sentence rather than a row of stacked tiles. */
+.countbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 1.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.count b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-right: 0.28rem;
+}
+.count b.is-zero  { color: var(--border); }
+.count b.is-alert { color: var(--bad-text); }
+
+.inline-warn {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.12rem 0.6rem;
+}
+
+/* One row for every log control. */
+.toolbar.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.7rem;
+}
+.segmented { display: inline-flex; margin: 0; }
+.seg {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 0.32rem 0.8rem;
+}
+.seg:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.seg:last-child  { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; border-left: 0; }
+.seg:hover { background: var(--surface-alt); }
+.seg.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.filterbox { min-width: 12rem; flex: 1 1 12rem; max-width: 22rem; font-size: 0.87rem; }
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.link.small { font-size: 0.85rem; }
+
+.logmeta {
+  margin: 0.45rem 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.logempty { margin: 0; }
+
+/* Filtered output is a result list, not a tail: start it at the top. */
+#log.reading { flex-direction: column; }
+
+.ln { display: block; min-height: 1.2em; }
+.ln.bad  { color: var(--bad-text); }
+.ln.good { color: var(--ok-text); }
+.ln.head { color: var(--accent); font-weight: 600; }
+
+@media (max-width: 720px) {
+  .controls { margin-left: 0; width: 100%; }
+  .statusbar { gap: 0.4rem; }
+}

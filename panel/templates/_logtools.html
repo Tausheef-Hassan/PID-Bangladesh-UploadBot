@@ -1,41 +1,17 @@
-{# Actions sit on the log because that is where you watch what they did. #}
-<div class="toolbar">
-  {% if signed_in %}
-    <form method="post" action="{{ url_for('run_now') }}">
-      <button type="submit">Run now</button>
-    </form>
-    {% if paused %}
-      <form method="post" action="{{ url_for('resume') }}">
-        <button type="submit" class="quiet">Resume schedule</button>
-      </form>
-    {% else %}
-      <form method="post" action="{{ url_for('pause') }}">
-        <button type="submit" class="quiet">Pause schedule</button>
-      </form>
-    {% endif %}
-    <form method="post" action="{{ url_for('stop') }}"
-          onsubmit="return confirm('Stop the job and kill the running pod?\n\nUploads already made in this run are not yet recorded in PIDDateData — that write happens once, at the end. Killing now means those images are downloaded, OCR'd and translated again next run, then rejected as duplicates.\n\nTo quiet the bot without losing work, use Pause schedule instead.')">
-      <button type="submit" class="danger">Stop job</button>
-    </form>
-  {% else %}
-    <a class="route" href="{{ url_for('sign_in_page') }}">Sign in to run the job</a>
-  {% endif %}
-</div>
-
-{# Stream picker is links, not submit buttons: two fields named "stream" in
-   one form would fight, and the first one in the DOM would always win. #}
-<div class="segmented">
-  <a class="seg {% if stream == 'out' %}on{% endif %}"
-     href="{{ url_for('index', stream='out', q=query or None,
-                      level='errors' if errors_only else None,
-                      live=None if live else '0') }}">Output</a>
-  <a class="seg {% if stream == 'err' %}on{% endif %}"
-     href="{{ url_for('index', stream='err', q=query or None,
-                      level='errors' if errors_only else None,
-                      live=None if live else '0') }}">Stderr</a>
-</div>
-
+{# Stream picker is links, not submit buttons: two fields named "stream" in one
+   form would fight, and the first in the DOM would always win. #}
 <form class="toolbar filters" method="get" action="{{ url_for('index') }}">
+  <span class="segmented">
+    <a class="seg {% if stream == 'out' %}on{% endif %}"
+       href="{{ url_for('index', stream='out', q=query or None,
+                        level='errors' if errors_only else None,
+                        live=None if live else '0') }}">Output</a>
+    <a class="seg {% if stream == 'err' %}on{% endif %}"
+       href="{{ url_for('index', stream='err', q=query or None,
+                        level='errors' if errors_only else None,
+                        live=None if live else '0') }}">Stderr</a>
+  </span>
+
   <input type="hidden" name="stream" value="{{ stream }}">
   <input type="search" name="q" value="{{ query }}" placeholder="Filter lines"
          class="filterbox" aria-label="Filter log lines">
@@ -45,7 +21,6 @@
            {% if errors_only %}checked{% endif %}
            onchange="this.form.submit()"> Problems only
   </label>
-
   <label class="check">
     <input type="checkbox" name="live" value="0"
            {% if not live %}checked{% endif %}
