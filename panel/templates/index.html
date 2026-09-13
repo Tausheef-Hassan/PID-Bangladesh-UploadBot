@@ -2,23 +2,19 @@
 {% block title %}Overview — pid-bot{% endblock %}
 {% block content %}
 
-  <div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
-       hx-trigger="every 5s" hx-swap="outerHTML">
+  <section class="card terminal">
     {% include '_dashboard.html' %}
-  </div>
-
-  <section class="card">
-    <h2>Live log</h2>
-    <p class="hint">The job's output, newest at the bottom.</p>
-
     {% include '_logtools.html' %}
-
     <div id="logwrap"
          hx-get="{{ log_url }}"
          {% if live %}hx-trigger="every 3s"{% endif %}
          hx-swap="innerHTML">
       {% include '_log.html' %}
     </div>
+  </section>
+
+  <section class="card">
+    {% include '_runs.html' %}
   </section>
 
 {% endblock %}

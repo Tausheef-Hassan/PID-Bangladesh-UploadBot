@@ -351,6 +351,12 @@ def queue():
     return render_template('queue.html')
 
 
+@app.get('/partials/runs')
+def partial_runs():
+    """The run strip polls on its own clock: it changes hourly, not every 5s."""
+    return render_template('_runs.html', **page_context())
+
+
 @app.get('/partials/dashboard')
 def partial_dashboard():
     """Polled by htmx; same context, just the part that changes."""

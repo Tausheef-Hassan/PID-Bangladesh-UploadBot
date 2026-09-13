@@ -1,68 +1,48 @@
+{# Compact status strip: this is the terminal's header, not a page hero. #}
 <div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
      hx-trigger="every 5s" hx-swap="outerHTML">
 
-  <section class="card">
-    <p class="jobname">pid-bot</p>
+  <div class="statusbar">
+    <span class="jobname">pid-bot</span>
+    <span class="state state-{{ state }}">{{ state_label }}</span>
+    {% if state == 'running' %}<span class="pill pill-running">live</span>
+    {% elif state == 'failed' %}<span class="pill pill-failed">needs a look</span>{% endif %}
 
-    <h1>{{ state_label }}{% if state == 'running' %}<span class="pill pill-running">live</span>
-      {% elif state == 'failed' %}<span class="pill pill-failed">needs a look</span>{% endif %}</h1>
+    <span class="statusmeta">
+      {% if started_ago %}started {{ started_ago }}{% if duration %}, running {{ duration }}{% endif %}
+      {% else %}no run recorded{% endif %}
+      {% if paused %}— schedule paused
+      {% elif next_in %}— next in {{ next_in }}{% endif %}
+    </span>
+  </div>
 
-    <p class="since">
-      {% if started_ago %}Last started <b>{{ started_ago }}</b>{% if duration %}, running <b>{{ duration }}</b>{% endif %}.
-      {% else %}No run recorded yet.{% endif %}
-      {% if paused %}Schedule is paused.
-      {% elif next_in %}Next run in <b>{{ next_in }}</b>.
-      {% else %}No schedule set.{% endif %}
-    </p>
-
-    {% if not api_reachable %}
-      <p class="aside">Showing the bot's own records. The Jobs API is
-        unreachable, so the controls won't work until it's back.</p>
-    {% endif %}
-
-    {% if latest %}
-      <div class="stats">
-        <div class="stat">
-          <span class="stat-n {% if not latest.uploaded %}is-zero{% endif %}">{{ latest.uploaded }}</span>
-          <span class="stat-l">uploaded</span>
-        </div>
-        <div class="stat">
-          <span class="stat-n {% if not latest.duplicates %}is-zero{% endif %}">{{ latest.duplicates }}</span>
-          <span class="stat-l">already on Commons</span>
-        </div>
-        <div class="stat">
-          <span class="stat-n {% if latest.failed %}is-alert{% else %}is-zero{% endif %}">{{ latest.failed }}</span>
-          <span class="stat-l">failed</span>
-        </div>
-        <div class="stat">
-          <span class="stat-n {% if not latest.scraped %}is-zero{% endif %}">{{ latest.scraped }}</span>
-          <span class="stat-l">images seen</span>
-        </div>
+  {% if latest %}
+    <div class="stats tight">
+      <div class="stat">
+        <span class="stat-n {% if not latest.uploaded %}is-zero{% endif %}">{{ latest.uploaded }}</span>
+        <span class="stat-l">uploaded</span>
       </div>
-    {% endif %}
-
-    {% if latest and latest.error %}
-      <p class="failure">{{ latest.error }}</p>
-    {% endif %}
-
-  </section>
-
-  <section class="card">
-    <h2>Recent runs</h2>
-    <p class="hint">One bar per run, height by images uploaded. Only failures are coloured.</p>
-    <div class="beat" role="img"
-         aria-label="Images uploaded per run across the last {{ ticks|length }} runs">
-      {% for t in ticks %}
-        <span class="tick tick-{{ t.status }}" style="height:{{ t.height }}%" title="{{ t.label }}"></span>
-      {% else %}
-        <p class="empty">No runs recorded yet. The first one shows up here.</p>
-      {% endfor %}
+      <div class="stat">
+        <span class="stat-n {% if not latest.duplicates %}is-zero{% endif %}">{{ latest.duplicates }}</span>
+        <span class="stat-l">already on Commons</span>
+      </div>
+      <div class="stat">
+        <span class="stat-n {% if latest.failed %}is-alert{% else %}is-zero{% endif %}">{{ latest.failed }}</span>
+        <span class="stat-l">failed</span>
+      </div>
+      <div class="stat">
+        <span class="stat-n {% if not latest.scraped %}is-zero{% endif %}">{{ latest.scraped }}</span>
+        <span class="stat-l">images seen</span>
+      </div>
     </div>
-    {% if ticks %}
-      <div class="beat-caption">
-        <span>{{ ticks|length }} runs ago</span>
-        <span>now</span>
-      </div>
-    {% endif %}
-  </section>
+  {% endif %}
+
+  {% if not api_reachable %}
+    <p class="aside compact">Showing the bot's own records. The Jobs API is
+      unreachable, so the controls won't work until it's back.</p>
+  {% endif %}
+
+  {% if latest and latest.error %}
+    <p class="failure">{{ latest.error }}</p>
+  {% endif %}
 </div>
