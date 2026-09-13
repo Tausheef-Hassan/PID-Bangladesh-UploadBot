@@ -48,7 +48,8 @@ def load_ia_keys():
             elif line.startswith('IA_SECRET_KEY='):
                 config.IA_KEYS['secret'] = line.split('=', 1)[1].strip()
     if config.IA_KEYS.get('access') and config.IA_KEYS.get('secret'):
-        print(f"Internet Archive keys loaded (access: {config.IA_KEYS['access'][:6]}...)")
+        # No key material here: the control panel serves this log publicly.
+        print("Internet Archive keys loaded.")
     else:
         print("Warning: ia.key found but IA_ACCESS_KEY/IA_SECRET_KEY missing — check file format.")
 

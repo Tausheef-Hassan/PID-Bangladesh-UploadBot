@@ -78,11 +78,12 @@ app = Flask(__name__)
 # Signing key for the session cookie. Derived from panel.key so it survives
 # restarts and is shared across gunicorn workers; random (logins drop on
 # restart) when no key is configured and the controls are disabled anyway.
-_key_material = ''
-try:
-    _key_material = Path(config.PANEL_KEY_PATH).read_text(encoding='utf-8').strip()
-except OSError:
-    pass
+_key_material = os.environ.get('PANEL_KEY', '').strip()
+if not _key_material:
+    try:
+        _key_material = Path(config.PANEL_KEY_PATH).read_text(encoding='utf-8').strip()
+    except OSError:
+        pass
 app.secret_key = (hashlib.sha256(('panel-session:' + _key_material).encode()).digest()
                   if _key_material else secrets.token_bytes(32))
 
@@ -142,7 +143,14 @@ def fetch_job():
 
 def panel_token():
     """The shared secret, re-read each time so it can be rotated without a
-    restart. Empty means the controls are switched off."""
+    restart. Empty means the controls are switched off.
+
+    $PANEL_KEY (set with `toolforge envvars create PANEL_KEY`) wins over the
+    file, so the secret need never sit on NFS where other tools can read it.
+    """
+    from_env = os.environ.get('PANEL_KEY', '').strip()
+    if from_env:
+        return from_env
     try:
         return Path(config.PANEL_KEY_PATH).read_text(encoding='utf-8').strip()
     except OSError:

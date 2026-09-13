@@ -350,12 +350,18 @@ once:
    [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose)
    with callback `https://<tool>.toolforge.org/oauth/callback` and the grant
    **Edit existing pages** — nothing more is needed.
-2. Once approved, write the consumer to `$TOOL_DATA_DIR/oauth.key`:
+2. Once approved, store the consumer as **envvars**, which keeps it off NFS
+   entirely:
+   ```bash
+   toolforge envvars create OAUTH_CONSUMER_KEY      # paste the value, then Ctrl-D
+   toolforge envvars create OAUTH_CONSUMER_SECRET
+   toolforge webservice buildservice restart
    ```
-   OAUTH_CONSUMER_KEY=...
-   OAUTH_CONSUMER_SECRET=...
-   ```
-   `chmod 600` it; `*.key` is already gitignored.
+   Never pass a secret as a command-line argument — it lands in your shell
+   history and is visible to other users of the same bastion.
+
+   A `$TOOL_DATA_DIR/oauth.key` file (`KEY=VALUE` lines) is the fallback and the
+   local-development path. If you use it, `chmod 600` it.
 
 Without `oauth.key` the panel stays read-only for Commons and says so, rather
 than falling back to the bot's own credentials.
@@ -365,9 +371,41 @@ matching — `{{en|1=…}}` contains nested templates. It refuses to save anythi
 it cannot parse confidently, and rejects descriptions or category names
 containing markup: leaving a page alone always beats writing a mangled one.
 
-**Auth:** reads are public; every write requires a secret stored in `panel.key`
-in `$TOOL_DATA_DIR` (same pattern as `gemini.key` and `ia.key`, and `*.key` is
-already gitignored). **No `panel.key` means the controls are disabled, not open.**
+**Auth:** reads are public; every write requires a secret — `$PANEL_KEY` if set,
+otherwise `panel.key` in `$TOOL_DATA_DIR`. **No key means the controls are
+disabled, not open.**
+
+### Keeping secrets private on Toolforge
+
+`/data/project/<tool>` is **readable by every other tool on Toolforge** unless
+you tighten permissions, and OAuth credentials have leaked this way before
+([T286414](https://phabricator.wikimedia.org/T286414)). Prefer the envvars
+service, which stores values outside the shared filesystem — only the tool's
+code and its maintainers can read them, though the *names* are public:
+
+```bash
+toolforge envvars create PANEL_KEY              # paste, then Ctrl-D
+toolforge envvars create OAUTH_CONSUMER_KEY
+toolforge envvars create OAUTH_CONSUMER_SECRET
+toolforge envvars list                          # names and values, as the tool
+toolforge webservice buildservice restart       # pick up the new values
+```
+
+If you keep secrets as files instead, restrict both the files and the directory:
+
+```bash
+chmod 600 ~/oauth.key ~/panel.key ~/gemini.key ~/ia.key ~/JSON.json           ~/drive_token.json ~/user-password.py
+chmod 750 ~                     # stop other tools listing your home
+ls -l ~/*.key                   # expect -rw------- and the tool as owner
+```
+
+Neither approach hides a secret from the tool's own **maintainers** — anyone who
+can `become` the tool can read anything it can. That is inherent to Toolforge;
+if a key is exposed, revoke it rather than trying to hide it.
+
+**The live log is public.** The panel serves `pid-bot.out` to anyone, so the bot
+must never print key material. `credentials.py` used to log the first six
+characters of the Internet Archive access key; it no longer does.
 
 **No third-party requests:** htmx is vendored into `panel/static/`, and Bengali
 text uses `local()` fonts via `unicode-range` rather than a font CDN — a

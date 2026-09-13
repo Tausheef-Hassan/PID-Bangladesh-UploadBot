@@ -9,12 +9,16 @@
 #   1. https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose
 #      Callback:  https://<tool>.toolforge.org/oauth/callback
 #      Grants:    "Edit existing pages"  (nothing more is needed)
-#   2. Put the approved consumer in $TOOL_DATA_DIR/oauth.key:
-#        OAUTH_CONSUMER_KEY=...
-#        OAUTH_CONSUMER_SECRET=...
-#      chmod 600 it; *.key is already gitignored.
+#   2. Store the approved consumer as envvars, which keeps it off NFS:
+#        toolforge envvars create OAUTH_CONSUMER_KEY     # paste, then Ctrl-D
+#        toolforge envvars create OAUTH_CONSUMER_SECRET
+#      A $TOOL_DATA_DIR/oauth.key file (KEY=VALUE lines, chmod 600) also works
+#      and is the local-development path, but /data/project/<tool> is readable
+#      by every other tool on Toolforge unless its permissions are tightened.
 #
-# Without oauth.key the panel stays read-only for Commons and says so.
+# Configured neither way, the panel stays read-only for Commons and says so.
+
+import os
 
 from mwoauth import ConsumerToken, AccessToken, initiate, complete, identify
 from requests_oauthlib import OAuth1
@@ -29,14 +33,25 @@ session = config.http_session(retries=2)
 
 
 def consumer():
-    """The registered OAuth consumer, or None when not configured."""
+    """The registered OAuth consumer, or None when not configured.
+
+    Environment first: `toolforge envvars` keeps the secret out of the tool's
+    home directory entirely, which matters because /data/project/<tool> is
+    readable by every other tool on Toolforge unless its permissions are
+    tightened. The file is the fallback for local development.
+    """
+    key = os.environ.get('OAUTH_CONSUMER_KEY')
+    secret = os.environ.get('OAUTH_CONSUMER_SECRET')
+    if key and secret:
+        return ConsumerToken(key, secret)
+
     values = {}
     try:
         with open(config.OAUTH_KEY_PATH, encoding='utf-8') as f:
             for line in f:
                 if '=' in line and not line.strip().startswith('#'):
-                    key, _, value = line.partition('=')
-                    values[key.strip()] = value.strip()
+                    name, _, value = line.partition('=')
+                    values[name.strip()] = value.strip()
     except OSError:
         return None
 

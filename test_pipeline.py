@@ -529,6 +529,29 @@ def test_category_names_cannot_smuggle_markup():
     raise AssertionError("category markup injection was accepted")
 
 
+def test_env_var_beats_the_key_file():
+    """Secrets belong in envvars, off the shared filesystem — so $PANEL_KEY
+    must win over a stale panel.key left behind on NFS."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config.PANEL_KEY_PATH = os.path.join(tmp, "panel.key")
+        with open(config.PANEL_KEY_PATH, "w", encoding="utf-8") as f:
+            f.write("from-the-file")
+
+        os.environ["PANEL_KEY"] = "from-the-environment"
+        try:
+            assert panel_app.panel_token() == "from-the-environment"
+        finally:
+            del os.environ["PANEL_KEY"]
+        assert panel_app.panel_token() == "from-the-file", "file fallback broken"
+
+
+def test_no_key_anywhere_disables_controls():
+    with tempfile.TemporaryDirectory() as tmp:
+        config.PANEL_KEY_PATH = os.path.join(tmp, "absent.key")
+        os.environ.pop("PANEL_KEY", None)
+        assert panel_app.panel_token() == ""
+
+
 def test_every_page_carries_the_navbar():
     """Each area is a real page, not another card bolted onto the dashboard."""
     with tempfile.TemporaryDirectory() as tmp:
