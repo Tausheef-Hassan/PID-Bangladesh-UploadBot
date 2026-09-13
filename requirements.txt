@@ -1,3 +1,4 @@
+# ── Bot pipeline ──────────────────────────────────────────────────────────────
 opencv-python-headless
 numpy
 requests
@@ -10,3 +11,10 @@ google-auth-httplib2
 google-genai
 pywikibot
 urllib3
+
+# ── Control panel (web: process type) ─────────────────────────────────────────
+flask
+gunicorn
+toolforge-weld     # Wikimedia's own Toolforge API client: certs, retries, errors
+humanize
+croniter

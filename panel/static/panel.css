@@ -1,0 +1,251 @@
+/* panel.css
+ *
+ * Structure borrows the matra (মাত্রা) — the headline stroke Bengali letters
+ * hang beneath. Sections hang below full-bleed rules instead of sitting in
+ * cards, which suits a page whose content is Bengali press captions.
+ *
+ * The heartbeat strip is the one loud element: this bot lives on an hourly
+ * clock, so its pulse is the thing worth showing first. Everything else stays
+ * quiet.
+ */
+
+/* Bengali OCR text gets a Bengali face; Latin keeps the UI face. local() only,
+ * so the panel makes no third-party font requests and ships no binaries. */
+@font-face {
+  font-family: 'BengaliText';
+  src: local('Noto Sans Bengali'), local('Nirmala UI'),
+       local('Vrinda'), local('Shonar Bangla');
+  unicode-range: U+0980-09FF, U+200C-200D;
+}
+
+:root {
+  --paper:  #E9ECEF;
+  --ink:    #16202B;
+  --matra:  #1F3A5F;
+  --live:   #0F766E;
+  --ok:     #3F6212;
+  --fail:   #9F1239;
+  --muted:  #5C6B7A;
+
+  --gutter: 2.5rem;
+  --sans: 'BengaliText', Archivo, 'Segoe UI Variable Text', system-ui,
+          -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'BengaliText', 'IBM Plex Mono', ui-monospace, 'Cascadia Mono',
+          'DejaVu Sans Mono', monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 var(--gutter) 4rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── The matra ─────────────────────────────────────────────────────────────
+   Structural members, not hairline dividers: content hangs off them. */
+.rule {
+  height: 2px;
+  background: var(--matra);
+  margin: 2.25rem calc(-1 * var(--gutter)) 0;
+}
+.rule-top { margin-top: 0; }
+
+/* ── Head ──────────────────────────────────────────────────────────────── */
+.head { padding-top: 1.1rem; }
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3.25rem);
+  font-weight: 700;
+  font-stretch: 85%;          /* Archivo's width axis, where available */
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+h2 {
+  margin: 1.1rem 0 0.6rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.state {
+  margin: 0.5rem 0 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+.state-running   { color: var(--live); }
+.state-succeeded { color: var(--ok); }
+.state-failed    { color: var(--fail); }
+.state-no-job,
+.state-unknown   { color: var(--muted); }
+
+.dur {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 0.5rem;
+}
+
+.detail { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.9rem; }
+
+/* ── Heartbeat ─────────────────────────────────────────────────────────────
+   One tick per hourly run. Height is images uploaded, colour is outcome. */
+.beat {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 88px;
+  margin-top: 1.4rem;
+}
+
+.tick {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: var(--matra);
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+.tick:hover { opacity: 1; }
+.tick-succeeded { background: var(--ok); }
+.tick-failed    { background: var(--fail); opacity: 0.9; }
+.tick-running   { background: var(--live); opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
+
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.empty { color: var(--muted); margin: 0; align-self: center; }
+
+/* ── Meta row ──────────────────────────────────────────────────────────── */
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2.25rem;
+  align-items: flex-start;
+  padding-top: 1rem;
+}
+
+.meta-item { display: flex; flex-direction: column; }
+
+.meta-value {
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.15;
+}
+.meta-item.nums .meta-value { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.meta-value.bad { color: var(--fail); }
+
+.meta-name { font-size: 0.85rem; color: var(--muted); }
+
+.actions { display: flex; gap: 0.6rem; margin-left: auto; flex-wrap: wrap; }
+.actions form { margin: 0; }
+
+/* ── Controls ──────────────────────────────────────────────────────────── */
+button {
+  font: inherit;
+  font-weight: 600;
+  color: var(--paper);
+  background: var(--matra);
+  border: 2px solid var(--matra);
+  border-radius: 2px;
+  padding: 0.5rem 1.1rem;
+  cursor: pointer;
+}
+button:hover { background: var(--ink); border-color: var(--ink); }
+
+button.quiet { background: transparent; color: var(--matra); }
+button.quiet:hover { background: var(--matra); color: var(--paper); }
+
+button.danger { background: transparent; color: var(--fail); border-color: var(--fail); }
+button.danger:hover { background: var(--fail); color: var(--paper); }
+
+:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; }
+
+.link { color: var(--matra); font-weight: 600; }
+
+/* ── Panes ─────────────────────────────────────────────────────────────── */
+.pane-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 2.5rem;
+}
+
+/* column-reverse pins the scroll to the newest line with no JS. */
+#log {
+  display: flex;
+  flex-direction: column-reverse;
+  height: 26rem;
+  overflow-y: auto;
+  background: var(--ink);
+  padding: 0.9rem 1.1rem;
+}
+
+.logtext {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: #C9D4DF;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.prose { max-width: 58ch; color: var(--muted); }
+.warn { color: var(--fail); }
+
+.failure {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--fail);
+  margin: 0.9rem 0 0;
+  white-space: pre-wrap;
+}
+
+/* ── Forms ─────────────────────────────────────────────────────────────── */
+.signin { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 1.4rem; }
+.signin label { font-size: 0.85rem; color: var(--muted); width: 100%; }
+
+input, textarea {
+  font: inherit;
+  color: var(--ink);
+  background: #FFF;
+  border: 2px solid var(--matra);
+  border-radius: 2px;
+  padding: 0.45rem 0.6rem;
+}
+
+.editor { display: flex; flex-direction: column; gap: 0.7rem; padding-top: 1.1rem; }
+.editor textarea { font-family: var(--mono); font-size: 0.9rem; line-height: 1.6; }
+.editor-actions { display: flex; gap: 1.2rem; align-items: center; }
+
+.notices {
+  list-style: none;
+  margin: 0;
+  padding: 0.7rem var(--gutter);
+  background: var(--matra);
+  color: var(--paper);
+  font-size: 0.9rem;
+  margin-left: calc(-1 * var(--gutter));
+  margin-right: calc(-1 * var(--gutter));
+}
+
+code { font-family: var(--mono); font-size: 0.88em; }
+
+/* ── Small screens ─────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  :root { --gutter: 1.1rem; }
+  .pane-grid { grid-template-columns: 1fr; }
+  .actions { margin-left: 0; width: 100%; }
+  .beat { height: 60px; }
+  #log { height: 18rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

@@ -6,7 +6,6 @@
 import math
 import os
 import re
-import tempfile
 from io import BytesIO
 
 import cv2
@@ -21,6 +20,9 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 import config
 from src import wayback
 from config import compute_checksum
+
+# PID serves the odd truncated JPEG; decode what is there rather than raising.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class ImageProcessor:
@@ -51,8 +53,13 @@ class ImageProcessor:
         except Exception as e:
             print(f"Failed to query Drive for temp files: {e}")
 
-    def initialize_vision_client(self):
-        """Initialize Google Drive OCR using OAuth2 user credentials"""
+    def initialize_vision_client(self, cleanup_orphans=False):
+        """Initialize Google Drive OCR using OAuth2 user credentials.
+
+        cleanup_orphans is for the boot instance only: the sweep matches on
+        name, so running it from a worker starting up mid-run would delete the
+        ocr_temp.png another worker is still exporting.
+        """
         try:
             if not os.path.exists(config.DRIVE_TOKEN_PATH):
                 raise RuntimeError(
@@ -67,8 +74,9 @@ class ImageProcessor:
                 'drive', 'v3', credentials=creds)
             
             # Clean up any leftover files from previous interrupted runs
-            self.cleanup_temp_drive_files()
-            
+            if cleanup_orphans:
+                self.cleanup_temp_drive_files()
+
             return True, "Drive OCR initialized with user OAuth2 credentials"
         except Exception as e:
             return False, f"Failed to initialize Drive OCR: {str(e)}"
@@ -80,8 +88,6 @@ class ImageProcessor:
         }
         response = self._session.get(url, headers=headers, timeout=30, verify=False)
         response.raise_for_status()
-
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         raw_bytes = response.content
         img_pil = Image.open(BytesIO(raw_bytes))
@@ -321,22 +327,20 @@ class ImageProcessor:
     def perform_ocr(self, image):
         """Perform OCR using Google Drive API (free, replaces Vision API)"""
         file_id = None
-        temp_path = None
-        temp_file_obj = None
         try:
-            # Save image section to a temp file
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
-            os.close(temp_fd)
-            cv2.imwrite(temp_path, image)
+            # Encode in memory — the bytes only ever travel to Drive, so a
+            # temp file on disk buys nothing but I/O and a cleanup path.
+            ok, encoded = cv2.imencode('.png', image)
+            if not ok:
+                raise RuntimeError("cv2.imencode failed for the OCR section")
 
             # Upload image to Drive as a Google Doc — Drive OCRs it automatically
             file_metadata = {
                 'name': 'ocr_temp.png',
                 'mimeType': 'application/vnd.google-apps.document',
             }
-            temp_file_obj = open(temp_path, 'rb')
             media = MediaIoBaseUpload(
-                temp_file_obj,
+                BytesIO(encoded.tobytes()),
                 mimetype='image/png',
                 resumable=False
             )
@@ -371,19 +375,6 @@ class ImageProcessor:
             return f"OCR Error: {str(e)}"
 
         finally:
-            if temp_file_obj:
-                try:
-                    temp_file_obj.close()
-                except Exception:
-                    pass
-
-            # Always delete the local temp file
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception as del_e:
-                    print(
-                        f"Warning: could not delete local temp file {temp_path}: {del_e}")
             # Always delete the temp file from Drive
             if file_id:
                 try:

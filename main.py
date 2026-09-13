@@ -18,6 +18,7 @@ import concurrent.futures
 import os
 import sys
 import threading
+import traceback
 
 from google import genai
 from google.cloud import translate_v2 as translate
@@ -25,7 +26,7 @@ from google.cloud import translate_v2 as translate
 # ── Project modules ───────────────────────────────────────────────────────────
 import config
 import credentials
-from src import wayback
+from src import run_state, wayback
 from src.commons_log import log_to_commons
 from src.image_processor import ImageProcessor
 from src.scraper import scrape_data
@@ -38,7 +39,6 @@ from src.translator import (
 from src.uploader import (
     ensure_pid_infrastructure,
     initialize_pywikibot,
-    update_pid_date_data,
     batch_update_pid_date_data,
     upload_to_commons,
 )
@@ -49,6 +49,12 @@ logger = config.logger
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def main():
+    """Record the run, then hand off to the pipeline."""
+    with run_state.record_run() as run:
+        _pipeline(run)
+
+
+def _pipeline(run):
     print("=" * 60)
     print("PID Image Processor & Uploader")
     print("=" * 60)
@@ -67,11 +73,10 @@ def main():
 
     # ── 0b. Pywikibot login + infrastructure (one login for the whole run) ────
     print("\nInitializing Pywikibot...")
-    result = initialize_pywikibot()
-    if result is None:
+    site = initialize_pywikibot()
+    if site is None:
         print("Error: Failed to initialize Pywikibot")
         sys.exit(1)
-    site, FilePage = result
 
     print("\nChecking and creating categories/modules before scraping...")
     ensure_pid_infrastructure(site)
@@ -102,7 +107,9 @@ def main():
         # ── Initialise API clients ────────────────────────────────────────────
         print("Initializing Google Cloud clients...")
         image_processor = ImageProcessor()
-        success, message = image_processor.initialize_vision_client()
+        # Boot instance is the only one allowed to sweep orphaned Drive files:
+        # workers spin up mid-run, when another worker's OCR file may be live.
+        success, message = image_processor.initialize_vision_client(cleanup_orphans=True)
         if not success:
             print(f"Error: {message}")
             sys.exit(1)
@@ -153,8 +160,9 @@ def main():
         success_count = 0
         failed_count = 0
 
-        # Track successful uploads for a single batch update to PIDDateData
-        successful_pid_updates = []
+        # Every URL that must never be retried — uploaded, duplicate, or already
+        # on Commons — collected here for one batch edit instead of one per row.
+        pid_updates = []
 
         # ── Per-image loop ────────────────────────────────────────────────────
         wayback_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -213,19 +221,13 @@ def main():
                     print(
                         f"Row {idx + 1}: Checksum match — registering URL in module, skipping upload")
                     dup_checksum = result.get('checksum', '')
-                    with upload_lock:
-                        pid_updated = update_pid_date_data(
-                            site, image_url, date_str, dup_checksum)
-
                     row["pid_date_data_info"] = f"JSON Tabular: {image_url} | {date_str} | {dup_checksum}"
                     row["upload_status"] = "Skipped (checksum duplicate)"
+                    row["pid_date_data_status"] = "Success (queued, dup)"
                     with counter_lock:
-                        if pid_updated:
-                            row["pid_date_data_status"] = "Success (dup)"
-                            success_count += 1
-                        else:
-                            row["pid_date_data_status"] = "Failed"
-                            failed_count += 1
+                        pid_updates.append(
+                            (image_url, date_str, dup_checksum, unique_id, ""))
+                        success_count += 1
                     return
 
                 if result['image'] is None or result['status'].startswith('Error') or result['status'].startswith('OCR failed'):
@@ -295,42 +297,31 @@ def main():
                 print(f"\nSTEP 6: Uploading to Wikimedia Commons...")
                 with upload_lock:
                     upload_success, upload_error = upload_to_commons(
-                        site, FilePage, result['image'], title, img_format,
+                        site, result['image'], title, img_format,
                         result.get('exif'), description
                     )
-
-                    if not upload_success and "already exists" in str(upload_error).lower():
-                        print(
-                            f"Row {idx + 1}: File already exists. Updating PIDDateData to prevent future retries...")
-                        pid_updated = update_pid_date_data(
-                            site, image_url, date_str, img_checksum, unique_id, title)
-                    else:
-                        pid_updated = False
 
                 with counter_lock:
                     if upload_success:
                         row["upload_status"] = "Success"
+                        row["pid_date_data_status"] = "Success (queued)"
                         success_count += 1
                         print(f"Row {idx + 1}: Upload successful")
-                        successful_pid_updates.append(
+                        pid_updates.append(
                             (image_url, date_str, img_checksum, unique_id, title))
-                        row["pid_date_data_status"] = "Success (queued)"
                     else:
                         row["upload_status"] = f"Failed: {upload_error}"
                         failed_count += 1
                         print(f"Row {idx + 1}: Upload failed - {upload_error}")
                         if "already exists" in str(upload_error).lower():
-                            if pid_updated:
-                                row["pid_date_data_status"] = "Success (exists)"
-                                print(
-                                    f"Row {idx + 1}: PIDDateData updated (duplicate bypassed)")
-                            else:
-                                row["pid_date_data_status"] = "Failed (exists)"
-                                print(
-                                    f"Row {idx + 1}: PIDDateData update failed")
+                            # Register it anyway so the next run stops retrying.
+                            row["pid_date_data_status"] = "Success (queued, exists)"
+                            pid_updates.append(
+                                (image_url, date_str, img_checksum, unique_id, title))
+                            print(
+                                f"Row {idx + 1}: File already exists — queued for PIDDateData")
 
             except Exception as e:
-                import traceback
                 traceback.print_exc()
                 print(f"Row {idx + 1}: Unhandled exception: {e}")
                 row["upload_status"] = f"Exception: {str(e)}"
@@ -345,10 +336,10 @@ def main():
 
         # ── Final save + Commons log ──────────────────────────────────────────
 
-        if successful_pid_updates:
+        if pid_updates:
             print(
-                f"\nBatch updating {len(successful_pid_updates)} records to PIDDateData...")
-            batch_update_pid_date_data(site, successful_pid_updates)
+                f"\nBatch updating {len(pid_updates)} records to PIDDateData...")
+            batch_update_pid_date_data(site, pid_updates)
 
         print("\nLogging results to Wikimedia Commons...")
         if log_to_commons(site, rows, success_count, failed_count, total_rows):
@@ -357,6 +348,12 @@ def main():
         print("\n" + "=" * 60)
         print("PROCESSING COMPLETED")
         print("=" * 60)
+        run["scraped"] = total_rows
+        run["uploaded"] = success_count
+        run["failed"] = failed_count
+        run["duplicates"] = sum(
+            1 for r in rows if r["upload_status"].startswith("Skipped (checksum duplicate)"))
+
         print(f"Total rows processed: {total_rows}")
         print(f"Successful uploads:   {success_count}")
         print(f"Failed uploads:       {failed_count}")

@@ -79,16 +79,9 @@ def fetch_wikimedia_data(year):
 
                 urls = set()
                 checksums = set()
-                
-                # Strip syntaxhighlight wrappers if they exist
-                if content.startswith("<syntaxhighlight lang=\"json\">\n"):
-                    content = content.replace("<syntaxhighlight lang=\"json\">\n", "")
-                if content.endswith("\n</syntaxhighlight>"):
-                    content = content.replace("\n</syntaxhighlight>", "")
-                
-                # Parse JSON
+
                 try:
-                    tab_data = json.loads(content)
+                    tab_data = json.loads(config.strip_syntaxhighlight(content))
                     urls_list = []
                     
                     if isinstance(tab_data, dict) and 'data' in tab_data:
@@ -297,10 +290,10 @@ def scrape_data():
 
     print(f"Current year: {current_year}")
     print("Fetching Wikimedia data...")
-    wikimedia_urls, wikimedia_checksums = fetch_wikimedia_data(current_year)
-    print(f"Loaded {len(wikimedia_urls)} URLs from {current_year}")
-    prev_year_urls, prev_year_checksums = fetch_wikimedia_data(previous_year)
-    print(f"Loaded {len(prev_year_urls)} URLs from {previous_year}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        (wikimedia_urls, wikimedia_checksums), (prev_year_urls, prev_year_checksums) =             executor.map(fetch_wikimedia_data, (current_year, previous_year))
+    print(f"Loaded {len(wikimedia_urls)} URLs from {current_year}, "
+          f"{len(prev_year_urls)} from {previous_year}")
     wikimedia_urls.update(prev_year_urls)
     wikimedia_checksums.update(prev_year_checksums)
     print(

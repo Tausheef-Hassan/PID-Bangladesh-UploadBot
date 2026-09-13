@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pid-bot</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+<script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+</head>
+<body>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <ul class="notices">
+      {% for m in messages %}<li>{{ m }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+{% endwith %}
+
+<div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
+     hx-trigger="every 5s" hx-swap="outerHTML">
+  {% include '_dashboard.html' %}
+</div>
+
+<section class="pane">
+  <div class="rule"></div>
+  <div class="pane-grid">
+    <div>
+      <h2>Live log</h2>
+      <div id="log" hx-get="{{ url_for('partial_log') }}"
+           hx-trigger="every 3s" hx-swap="innerHTML">
+        {% include '_log.html' %}
+      </div>
+    </div>
+
+    <div>
+      <h2>Tools</h2>
+      <p class="prose">
+        Bengali replacements are applied to OCR text before it reaches the
+        translator, so fixing one here changes every future run without a rebuild.
+      </p>
+      <a class="link" href="{{ url_for('replacements') }}">Edit Bengali replacements</a>
+
+      {% if controls_enabled %}
+        {% if signed_in %}
+          <form method="post" action="{{ url_for('sign_out') }}" class="signin">
+            <button type="submit" class="quiet">Sign out</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('sign_in') }}" class="signin">
+            <label for="token">Panel key</label>
+            <input id="token" name="token" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button>
+          </form>
+        {% endif %}
+      {% else %}
+        <p class="prose warn">
+          Controls are off. Add a secret to <code>panel.key</code> in the tool's
+          data directory to turn them on.
+        </p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

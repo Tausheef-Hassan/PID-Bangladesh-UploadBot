@@ -5,6 +5,7 @@
 #
 # Run with:  python test_pipeline.py
 
+import importlib
 import json
 import os
 import sys
@@ -14,7 +15,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from src import commons_log, wayback
+from src import commons_log, run_state, translator, wayback
+from panel import app as panel_app
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -209,6 +211,177 @@ def test_retry_budget_leaves_remainder_queued():
 
         left = json.load(open(config.WAYBACK_QUEUE_PATH, encoding="utf-8"))
         assert left == urls, f"a spent budget must requeue everything, got {left}"
+
+
+# ── 3. Gemini model ladder ────────────────────────────────────────────────────
+
+class FakeGemini:
+    """Plays back scripted replies: a str is returned as resp.text, an
+    Exception is raised. Doubles as its own `.models` namespace."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls = 0
+        self.models = self
+
+    def generate_content(self, model, contents, config):
+        self.calls += 1
+        reply = self.replies.pop(0) if self.replies else RuntimeError("script exhausted")
+        if isinstance(reply, Exception):
+            raise reply
+        return type("Resp", (), {"text": reply})()
+
+
+def _no_sleep():
+    translator.sleep = lambda s: None
+
+
+def test_ladder_retries_transient_on_the_same_model():
+    _no_sleep()
+    free = FakeGemini(RuntimeError("429 resource exhausted"), "Cabinet meeting held")
+    out, status = translator.translate_text(free, FakeGemini(), None, "বাংলা", 1)
+
+    assert status == "Success", status
+    assert out == "Cabinet meeting held"
+    assert free.calls == 2, f"a 429 must be retried on the free tier, not skipped ({free.calls})"
+
+
+def test_ladder_drops_to_the_paid_client_on_a_hard_error():
+    _no_sleep()
+    free = FakeGemini(ValueError("permission denied"))   # not transient
+    paid = FakeGemini("Paid answer")
+    out, status = translator.translate_text(free, paid, None, "বাংলা", 2)
+
+    assert (out, status) == ("Paid answer", "Success"), (out, status)
+    assert free.calls == 1, "a hard error must not burn retries on the same model"
+
+
+def test_over_long_title_is_resampled():
+    _no_sleep()
+    free = FakeGemini("x" * 300, "Cabinet meeting in Dhaka 2026-09-11")
+    title, status = translator.generate_title(
+        free, FakeGemini(), "description", "2026-09-11", 3, "jpg")
+
+    assert status == "Success", status
+    assert title == "Cabinet meeting in Dhaka 2026-09-11.jpg", title
+    assert len(title.encode()) <= 244, "Commons rejects titles past its byte cap"
+    assert free.calls == 2, "an over-long title must cost another sample"
+
+
+def test_exhausted_ladder_reports_an_error_instead_of_raising():
+    _no_sleep()
+    dead = lambda: FakeGemini(*[RuntimeError("boom")] * 20)
+    out, status = translator.translate_text(dead(), dead(), None, "বাংলা", 4)
+
+    assert out == ""
+    assert status.startswith("Error:"), status
+
+
+# ── 4. Run state ──────────────────────────────────────────────────────────────
+
+def _isolate_state(tmpdir):
+    config.RUN_STATE_PATH = os.path.join(tmpdir, "run_state.json")
+
+
+def test_successful_run_is_recorded():
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate_state(tmp)
+        with run_state.record_run() as run:
+            run["uploaded"] = 12
+            run["scraped"] = 40
+
+        (rec,) = run_state.load()
+        assert rec["status"] == "succeeded", rec
+        assert rec["uploaded"] == 12
+        assert rec["finished_at"], "a finished run must carry a finish time"
+
+
+def test_crash_is_recorded_and_still_raises():
+    """A crash must reach Toolforge (so the job is marked failed) AND be logged."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate_state(tmp)
+        try:
+            with run_state.record_run():
+                raise RuntimeError("gemini exploded")
+        except RuntimeError:
+            pass
+        else:
+            assert False, "record_run swallowed the exception"
+
+        (rec,) = run_state.load()
+        assert rec["status"] == "failed", rec
+        assert "gemini exploded" in rec["error"]
+
+
+def test_killed_run_leaves_a_running_row():
+    """The panel's Stop button kills the pod; the row written at start is the
+    only evidence the run ever happened."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate_state(tmp)
+        run = run_state.record_run()
+        run.__enter__()          # start the run, then walk away as SIGKILL would
+
+        (rec,) = run_state.load()
+        assert rec["status"] == "running", rec
+        assert rec["finished_at"] is None, "an interrupted run must have no finish time"
+
+        run.__exit__(None, None, None)   # close it out inside the temp dir
+
+
+def test_history_is_capped():
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate_state(tmp)
+        with open(config.RUN_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump([{"started_at": str(i)} for i in range(500)], f)
+        with run_state.record_run():
+            pass
+        assert len(run_state.load()) == run_state.MAX_RECORDS
+
+
+# ── 5. Panel controls ─────────────────────────────────────────────────────────
+
+def _panel_client(tmp, token=None):
+    config.PANEL_KEY_PATH = os.path.join(tmp, "panel.key")
+    config.RUN_STATE_PATH = os.path.join(tmp, "run_state.json")
+    if token:
+        with open(config.PANEL_KEY_PATH, "w", encoding="utf-8") as f:
+            f.write(token)
+    importlib.reload(panel_app)
+    return panel_app.app.test_client()
+
+
+def test_missing_key_disables_controls_rather_than_opening_them():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp)          # no panel.key at all
+        assert client.post("/run").status_code == 503, "no key must disable, not allow"
+        assert client.post("/stop").status_code == 503
+
+
+def test_wrong_key_is_refused():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        assert client.post("/run").status_code == 403
+        client.post("/sign-in", data={"token": "not-it"})
+        assert client.post("/run").status_code == 403, "a bad key granted access"
+
+
+def test_read_only_views_stay_public():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        for route in ("/", "/partials/dashboard", "/partials/log", "/healthz"):
+            assert client.get(route).status_code == 200, route
+        assert "Run now" not in client.get("/").get_data(as_text=True), \
+            "controls must not render for a signed-out visitor"
+
+
+def test_zero_upload_runs_still_draw_a_tick():
+    """A quiet hour is information: it must not look like missing data."""
+    ticks = panel_app.heartbeat([
+        {"started_at": None, "status": "succeeded", "uploaded": 0},
+        {"started_at": None, "status": "succeeded", "uploaded": 10},
+    ])
+    assert ticks[0]["height"] > 0, "a zero-upload run rendered as a gap"
+    assert ticks[1]["height"] == 100
 
 
 if __name__ == "__main__":

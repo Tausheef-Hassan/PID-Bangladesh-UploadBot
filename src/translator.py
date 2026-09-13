@@ -5,6 +5,7 @@
 import os
 import random
 import re
+from datetime import datetime
 from time import sleep
 
 import config
@@ -70,97 +71,104 @@ def google_translate(translate_client, text):
         return None
 
 
-def translate_text(genai_client, vertex_client, translate_client, text, row_index):
-    """Translate Bengali text to English.
+_TRANSIENT_MARKERS = ("429", "resource exhausted", "timeout",
+                      "connection", "temporar", "503", "500")
 
-    Attempt order (cheapest first):
-      1. AI Studio  — primary model   (Free)
-      2. Vertex AI  — primary model   (Paid)
-      3. AI Studio  — fallback model  (Free)
-      4. Vertex AI  — fallback model  (Paid)
-      5. Google Translate             (Paid, last resort if Gemini output still has Bengali)
+
+class _Retry(Exception):
+    """Raised by an `accept` callback to ask the same model for another sample."""
+
+
+def _gemini_text(genai_client, vertex_client, prompt, max_tokens, row_index, accept):
+    """Walk the free→paid model ladder with backoff until `accept` takes an answer.
+
+    Attempt order (cheapest first): AI Studio primary (Free), Vertex primary
+    (Paid), AI Studio fallback (Free), Vertex fallback (Paid). Each slot gets
+    MAX_RETRIES tries on a transient error or an `accept` that raises _Retry.
+
+    Returns (accepted_value, source_name); raises RuntimeError if all slots fail.
     """
-    if not text.strip():
-        return "", "EmptyText"
-
-    prompt = config.TRANSLATION_PROMPT.format(text=text.replace('"', "'"))
-
-    models_to_try = [
-        (genai_client, config.PRIMARY_MODEL,  "AI Studio primary  (Free)"),
+    ladder = (
+        (genai_client,  config.PRIMARY_MODEL,  "AI Studio primary  (Free)"),
         (vertex_client, config.PRIMARY_MODEL,  "Vertex AI primary  (Paid)"),
-        (genai_client, config.FALLBACK_MODEL, "AI Studio fallback (Free)"),
+        (genai_client,  config.FALLBACK_MODEL, "AI Studio fallback (Free)"),
         (vertex_client, config.FALLBACK_MODEL, "Vertex AI fallback (Paid)"),
-    ]
-
+    )
     last_exception = None
 
-    for client, model_name, source_name in models_to_try:
+    for client, model, source_name in ladder:
         backoff = config.INITIAL_BACKOFF
 
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:
-                print(f"Row {row_index}: Translation attempt {attempt} via {source_name} ({model_name})...")
-
-                generation_config = {
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                    "max_output_tokens": 8192,
-                }
+                print(f"Row {row_index}: Attempt {attempt} via {source_name} ({model})...")
 
                 resp = client.models.generate_content(
-                    model=model_name,
+                    model=model,
                     contents=prompt,
-                    config=generation_config
+                    config={"temperature": 1.0, "top_p": 0.95,
+                            "max_output_tokens": max_tokens},
                 )
-                sleep(2)
+                sleep(2)   # client-side spacing; the free tier is rate limited
 
-                if hasattr(resp, "text"):
-                    translated = resp.text.strip()
-                else:
-                    translated = resp.candidates[0].content.parts[0].text.strip()
-
-                translated = (translated or "").strip()
-                if not translated:
+                text = (getattr(resp, "text", None)
+                        or resp.candidates[0].content.parts[0].text or "").strip()
+                if not text:
                     raise RuntimeError("Empty response")
 
-                # If Gemini still returns Bengali, run Google Translate on top
-                if contains_bengali(translated):
-                    print(f"Row {row_index}: Bengali detected in Gemini output — running Google Translate cleanup")
-                    gt_result = google_translate(translate_client, translated)
-                    if gt_result:
-                        translated = gt_result
-                        sleep(1)
-
-                print(f"Row {row_index}: Translation succeeded via {source_name}")
-                return translated, "Success"
+                return accept(text), source_name
 
             except Exception as e:
                 last_exception = e
-                msg = str(e).lower()
-                is_transient = (
-                    "429" in msg or "resource exhausted" in msg
-                    or "timeout" in msg or "connection" in msg
-                    or "temporar" in msg or "503" in msg or "500" in msg
-                )
+                retryable = isinstance(e, _Retry) or any(
+                    m in str(e).lower() for m in _TRANSIENT_MARKERS)
 
-                if is_transient and attempt < config.MAX_RETRIES:
-                    wait = min(backoff, config.MAX_BACKOFF)
-                    print(f"Row {row_index}: Transient error on {source_name} (attempt {attempt}): {e} — retrying in {wait:.1f}s")
+                if retryable and attempt < config.MAX_RETRIES:
+                    wait = min(backoff, config.MAX_BACKOFF) + random.uniform(0, backoff * 0.5)
+                    print(f"Row {row_index}: Retryable error on {source_name} (attempt {attempt}): {e} — retrying in {wait:.1f}s")
                     sleep(wait)
                     backoff = min(backoff * config.BACKOFF_MULTIPLIER, config.MAX_BACKOFF)
                 else:
                     print(f"Row {row_index}: {source_name} gave up after attempt {attempt}: {e}")
                     break  # move to next client/model slot
 
-    print(f"Row {row_index}: All translation clients exhausted. Last error: {last_exception}")
-    return "", f"Error: All models failed — {repr(last_exception)}"
+    raise RuntimeError(f"All models failed — {last_exception!r}")
+
+
+def translate_text(genai_client, vertex_client, translate_client, text, row_index):
+    """Translate Bengali text to English via the Gemini ladder.
+
+    Google Translate is the last resort, applied on top when Gemini's own
+    output still contains Bengali.
+    """
+    if not text.strip():
+        return "", "EmptyText"
+
+    def accept(translated):
+        if contains_bengali(translated):
+            print(f"Row {row_index}: Bengali detected in Gemini output — running Google Translate cleanup")
+            gt_result = google_translate(translate_client, translated)
+            if gt_result:
+                sleep(1)
+                return gt_result
+        return translated
+
+    prompt = config.TRANSLATION_PROMPT.format(text=text.replace('"', "'"))
+    try:
+        translated, source_name = _gemini_text(
+            genai_client, vertex_client, prompt, 8192, row_index, accept)
+    except RuntimeError as e:
+        print(f"Row {row_index}: All translation clients exhausted. {e}")
+        return "", f"Error: {e}"
+
+    print(f"Row {row_index}: Translation succeeded via {source_name}")
+    return translated, "Success"
 
 
 # ── Title / filename generation ───────────────────────────────────────────────
 
 def replace_date_if_needed(title, col_b_date_str):
     """Replace date in title if difference > 7 days from the scraper date"""
-    from datetime import datetime
     col_b_match = re.search(r'(\d{4}-\d{2}-\d{2})', col_b_date_str)
     if not col_b_match:
         return title
@@ -192,90 +200,24 @@ def generate_title(genai_client, vertex_client, description, date_str, row_index
     """Generate a Wikimedia Commons–compliant filename via Gemini"""
     text = f"{description} {date_str}".strip()
 
-    if not text.strip():
+    if not text:
         return "", "EmptyText"
 
+    def accept(title):
+        # Commons caps page titles at 255 bytes; the prompt asks for ≤240.
+        if len(title.encode('utf-8')) > 240:
+            raise _Retry(f"Title too long ({len(title.encode('utf-8'))} bytes)")
+        title = replace_date_if_needed(title, date_str)
+        print(f"Row {row_index}: Title generated (without extension): {title}")
+        return f"{title}.{img_format}"
+
     prompt = config.TITLE_PROMPT.format(text=text.replace('"', "'"))
+    try:
+        title, source_name = _gemini_text(
+            genai_client, vertex_client, prompt, 2048, row_index, accept)
+    except RuntimeError as e:
+        print(f"Row {row_index}: Failed all models: {e}")
+        return "", f"Error: {e}"
 
-    models_to_try = [
-        (genai_client, config.PRIMARY_MODEL,  "AI Studio primary  (Free)"),
-        (vertex_client, config.PRIMARY_MODEL,  "Vertex AI primary  (Paid)"),
-        (genai_client, config.FALLBACK_MODEL, "AI Studio fallback (Free)"),
-        (vertex_client, config.FALLBACK_MODEL, "Vertex AI fallback (Paid)"),
-    ]
-    last_exception = None
-
-    for client, model, source_name in models_to_try:
-        backoff = config.INITIAL_BACKOFF
-
-        for attempt in range(1, config.MAX_RETRIES + 1):
-            try:
-                print(f"Row {row_index}: Sending request to {model} via {source_name}...")
-
-                generation_config = {
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                    "max_output_tokens": 2048,
-                }
-
-                resp = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=generation_config
-                )
-                sleep(2)
-
-                print(f"Row {row_index}: Received response from {source_name}")
-                sleep(1)
-
-                if hasattr(resp, "text"):
-                    title = resp.text.strip()
-                else:
-                    title = resp.candidates[0].content.parts[0].text.strip()
-
-                title = (title or "").strip()
-
-                if not title:
-                    raise RuntimeError("Empty response")
-
-                if len(title.encode('utf-8')) > 240:
-                    if attempt < config.MAX_RETRIES:
-                        print(f"Row {row_index}: Title too long ({len(title.encode('utf-8'))} bytes), retrying")
-                        wait = min(backoff, config.MAX_BACKOFF) + random.uniform(0, backoff * 0.5)
-                        sleep(wait)
-                        backoff = min(backoff * config.BACKOFF_MULTIPLIER, config.MAX_BACKOFF)
-                        continue
-                    else:
-                        raise RuntimeError(f"Title exceeds 240 bytes after {config.MAX_RETRIES} attempts")
-
-                title = replace_date_if_needed(title, date_str)
-
-                print(f"Row {row_index}: Title generated with {source_name} (without extension): {title}")
-
-                # Append file extension
-                title = title + '.' + img_format
-
-                print(f"Row {row_index}: Final title (with extension): {title}")
-                sleep(2)
-                return title, "Success"
-
-            except Exception as e:
-                last_exception = e
-                msg = str(e).lower()
-
-                is_429 = ("429" in msg) or ("resource exhausted" in msg)
-                is_transient = is_429 or ("timeout" in msg) or ("connection" in msg) or \
-                               ("temporar" in msg) or ("503" in msg) or ("500" in msg)
-
-                if is_transient and attempt < config.MAX_RETRIES:
-                    wait = min(backoff, config.MAX_BACKOFF) + random.uniform(0, backoff * 0.5)
-                    print(f"Row {row_index}: Transient error on {source_name} (attempt {attempt}): {e}, retrying in {wait:.1f}s")
-                    sleep(wait)
-                    backoff = min(backoff * config.BACKOFF_MULTIPLIER, config.MAX_BACKOFF)
-                    continue
-                else:
-                    print(f"Row {row_index}: {source_name} error (no more retries): {e}")
-                    break
-
-    print(f"Row {row_index}: Failed all models: {last_exception}")
-    return "", f"Error:{repr(last_exception)}"
+    print(f"Row {row_index}: Final title from {source_name}: {title}")
+    return title, "Success"

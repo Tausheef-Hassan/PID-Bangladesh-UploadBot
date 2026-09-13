@@ -70,7 +70,13 @@ FALLBACK_MODEL = "gemini-3.5-flash"
 # Credential files: $TOOL_DATA_DIR on Toolforge, SCRIPT_DIR locally
 GEMINI_CONFIG_PATH = os.path.join(CREDS_DIR, 'gemini.key')   # AI Studio free API key
 IA_KEY_PATH = os.path.join(CREDS_DIR, 'ia.key')              # Internet Archive S3-like keys
+PANEL_KEY_PATH = os.path.join(CREDS_DIR, 'panel.key')        # Shared secret for the control panel
 WAYBACK_QUEUE_PATH = os.path.join(CREDS_DIR, 'wayback_pending.json')  # Persistent retry queue
+RUN_STATE_PATH = os.path.join(CREDS_DIR, 'run_state.json')   # Per-run outcomes, read by the panel
+
+# Toolforge job this bot runs as; the panel drives it through the Jobs API.
+JOB_NAME = 'pid-bot'
+TOOL_NAME = os.environ.get('TOOL_NAME') or os.path.basename(TOOL_DATA_DIR) or 'pid-bangladesh-uploadbot2'
 
 # AI call retries (translator's own backoff ladder)
 MAX_RETRIES = 5
@@ -109,6 +115,12 @@ TITLE_PROMPT = (
 def compute_checksum(raw_bytes):
     """Compute MD5 checksum of raw image bytes for duplicate detection"""
     return hashlib.md5(raw_bytes).hexdigest()
+
+
+def strip_syntaxhighlight(content):
+    """Unwrap the <syntaxhighlight lang="json"> block older PIDDateData revisions carry."""
+    return (content.removeprefix('<syntaxhighlight lang="json">\n')
+                   .removesuffix('\n</syntaxhighlight>'))
 
 
 def http_session(retries=HTTP_RETRIES, backoff=1.0):

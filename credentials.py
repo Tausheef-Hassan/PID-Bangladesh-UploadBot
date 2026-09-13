@@ -50,7 +50,7 @@ def load_ia_keys():
     if config.IA_KEYS.get('access') and config.IA_KEYS.get('secret'):
         print(f"Internet Archive keys loaded (access: {config.IA_KEYS['access'][:6]}...)")
     else:
-        print(f"Warning: ia.key found but IA_ACCESS_KEY/IA_SECRET_KEY missing — check file format.")
+        print("Warning: ia.key found but IA_ACCESS_KEY/IA_SECRET_KEY missing — check file format.")
 
 
 def _validate(creds, source):

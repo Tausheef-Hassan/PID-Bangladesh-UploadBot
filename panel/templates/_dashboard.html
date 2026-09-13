@@ -1,0 +1,84 @@
+<div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
+     hx-trigger="every 5s" hx-swap="outerHTML">
+
+  <div class="rule rule-top"></div>
+
+  <header class="head">
+    <h1>pid-bot</h1>
+    <p class="state state-{{ state }}">
+      {{ state_label }}
+      {% if duration %}<span class="dur">{{ duration }}</span>{% endif %}
+    </p>
+    {% if state_detail %}<p class="detail">{{ state_detail }}</p>{% endif %}
+    {% if not api_reachable %}
+      <p class="detail warn">Read from the bot's own records. The Jobs API is
+        unreachable, so the controls won't work until it's back.</p>
+    {% endif %}
+  </header>
+
+  <div class="beat" role="img"
+       aria-label="Uploads per run over the last {{ ticks|length }} runs">
+    {% for t in ticks %}
+      <span class="tick tick-{{ t.status }}" style="height:{{ t.height }}%"
+            title="{{ t.label }}"></span>
+    {% else %}
+      <p class="empty">No runs recorded yet. The first one will show up here.</p>
+    {% endfor %}
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="meta">
+    <div class="meta-item">
+      <span class="meta-value">{{ started_ago or 'never' }}</span>
+      <span class="meta-name">last started</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-value">
+        {% if paused %}paused{% elif next_in %}in {{ next_in }}{% else %}unscheduled{% endif %}
+      </span>
+      <span class="meta-name">next run</span>
+    </div>
+
+    {% if latest %}
+      <div class="meta-item nums">
+        <span class="meta-value">{{ latest.uploaded }}</span>
+        <span class="meta-name">uploaded</span>
+      </div>
+      <div class="meta-item nums">
+        <span class="meta-value">{{ latest.duplicates }}</span>
+        <span class="meta-name">already on Commons</span>
+      </div>
+      <div class="meta-item nums">
+        <span class="meta-value {% if latest.failed %}bad{% endif %}">{{ latest.failed }}</span>
+        <span class="meta-name">failed</span>
+      </div>
+    {% endif %}
+
+    {% if signed_in %}
+      <div class="actions">
+        <form method="post" action="{{ url_for('run_now') }}">
+          <button type="submit">Run now</button>
+        </form>
+        {% if paused %}
+          <form method="post" action="{{ url_for('resume') }}">
+            <button type="submit">Resume schedule</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('pause') }}">
+            <button type="submit" class="quiet">Pause schedule</button>
+          </form>
+        {% endif %}
+        <form method="post" action="{{ url_for('stop') }}"
+              onsubmit="return confirm('Stop the job and kill the running pod?\n\nUploads already made in this run are not yet recorded in PIDDateData — that write happens once, at the end. Killing now means those images are downloaded, OCR'd and translated again next run, then rejected as duplicates.\n\nTo quiet the bot without losing work, use Pause schedule instead.')">
+          <button type="submit" class="danger">Stop job</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if latest and latest.error %}
+    <div class="rule"></div>
+    <p class="failure">{{ latest.error }}</p>
+  {% endif %}
+</div>

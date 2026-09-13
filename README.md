@@ -287,7 +287,43 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **`Procfile`** defines the `run-bot` process type that `job.yaml` invokes.
 - **`$TOOL_DATA_DIR`** is automatically set by the Build Service; credential files are read from there.
 - **IPv4 enforcement** is applied at startup (via `config.py`) to avoid Kubernetes IPv6 issues.
-- **`toolforge/job.yaml`** registers the hourly background job; there is no web service.
+- **`toolforge/job.yaml`** registers the hourly background job.
+- **`Procfile` order matters.** `toolforge webservice buildservice start` runs the
+  *first* entry in the Procfile whatever it is called, so `web` must stay above
+  `run-bot`. With `run-bot` first the webservice would launch the pipeline, which
+  never binds port 8000, and the webservice would fail to come up.
+
+### Control panel
+
+A Flask app served at `https://<tool>.toolforge.org` shows whether the bot is
+running or crashed, streams the live log, and drives the job. It runs in its own
+pod and never imports the pipeline: it talks to the **Toolforge Jobs API**
+through [`toolforge-weld`](https://pypi.org/project/toolforge-weld/) (the client
+Wikimedia's own `toolforge` CLI is built on) and reads the files the bot leaves
+in `$TOOL_DATA_DIR`.
+
+| Control | Jobs API call |
+|---|---|
+| Run now | `POST …/jobs/pid-bot/restart` — "if the job is a cronjob, execute it right now" |
+| Pause / Resume | `PATCH …/jobs/pid-bot` rewriting `schedule` |
+| Stop | `DELETE …/jobs/pid-bot` |
+| Status | `GET …/jobs/pid-bot` → `status.short` |
+
+**Pause, not Stop, is the safe lever.** `main.py` writes every successful upload
+to `PIDDateData` in a single batch edit at the very end of a run, so killing a
+run mid-flight discards that run's registrations — those images get scraped,
+OCR'd and translated again next run, then rejected as duplicates. Pause rewrites
+the schedule to a date that never arrives (31 February), leaving the job
+definition and any in-flight run untouched. The Stop button says all this before
+you press it.
+
+**Auth:** reads are public; every write requires a secret stored in `panel.key`
+in `$TOOL_DATA_DIR` (same pattern as `gemini.key` and `ia.key`, and `*.key` is
+already gitignored). **No `panel.key` means the controls are disabled, not open.**
+
+**No third-party requests:** htmx is vendored into `panel/static/`, and Bengali
+text uses `local()` fonts via `unicode-range` rather than a font CDN — a
+Wikimedia tool should not hand visitors' IP addresses to someone else.
 
 ---
 
@@ -305,6 +341,10 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 | `src/commons_log.py` | Writes run summary to the bot's **daily** JSON log page on Commons |
 | `test_pipeline.py` | Offline self-checks for the two silent-failure modes (log size, Wayback tail) |
 | `src/wayback.py` | Async Wayback archiving; submits without polling, confirms from the queue next run |
+| `src/run_state.py` | Per-run outcome records (`run_state.json`) that the panel reads |
+| `panel/app.py` | Control panel: Jobs API proxy, auth, log tail |
+| `panel/templates/` | Server-rendered views; htmx polls the two that change |
+| `panel/static/panel.css` | Panel styling |
 | `data/translation_replacements.tsv` | Manual OCR correction rules applied before translation |
 | `wayback_pending.json` | Persistent queue for failed Wayback Machine submissions |
 
@@ -320,3 +360,4 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **Bounded log pages:** The Commons log is one JSON page per day. Every run rewrites the whole page, so a month of hourly runs on a single page would cross `$wgMaxArticleSize` and every subsequent save would fail silently. `wikitext_description` is stripped before logging for the same reason — it is the heaviest key and is rebuilt at upload time anyway.
 - **Bounded Wayback tail:** Archive submissions are fire-and-forget (`confirm=False`); polling SPN2 costs up to 90 s per URL and the pool thread is non-daemon, which kept the hourly job alive long after its work was done. Unconfirmed URLs sit in `wayback_pending.json` and the next run's confirmation pass clears them under a `RETRY_BUDGET` wall-clock cap (600 s).
 - **Toolforge ready:** The bot is a plain one-shot script; Toolforge's job scheduler owns the hourly cadence, so the process has no internal loop to supervise.
+- **Two status signals:** The Jobs API knows whether the pod is alive; `run_state.json` knows what the run actually did. The panel prefers the API and falls back to the file when the API is unreachable, rather than reporting "not loaded" for what is really a control-plane outage.

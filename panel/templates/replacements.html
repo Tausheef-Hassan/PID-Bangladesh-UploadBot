@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bengali replacements — pid-bot</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+</head>
+<body>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <ul class="notices">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endwith %}
+
+<div class="rule rule-top"></div>
+
+<header class="head">
+  <h1>Bengali replacements</h1>
+  <p class="prose">
+    Each line is Bengali text, three pipes, then what to put in its place.
+    These run on OCR output before it reaches the translator, so a fix here
+    changes every future run. Lines starting with <code>#</code> are ignored.
+  </p>
+</header>
+
+<div class="rule"></div>
+
+<section class="pane">
+  {% if signed_in %}
+    <form method="post" class="editor">
+      <label for="text">Replacement rules</label>
+      <textarea id="text" name="text" spellcheck="false" rows="22">{{ text }}</textarea>
+      <div class="editor-actions">
+        <button type="submit">Save replacements</button>
+        <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
+      </div>
+    </form>
+  {% else %}
+    <pre class="logtext">{{ text or 'No replacements defined yet.' }}</pre>
+    <p class="prose">
+      {% if controls_enabled %}Sign in on the main page to edit these.
+      {% else %}Editing is off until a secret is set in <code>panel.key</code>.{% endif %}
+    </p>
+    <a class="link" href="{{ url_for('index') }}">Back to the bot</a>
+  {% endif %}
+</section>
+
+</body>
+</html>
