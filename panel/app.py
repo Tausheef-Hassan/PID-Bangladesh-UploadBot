@@ -7,20 +7,25 @@
 
 import functools
 import hashlib
+import json
 import os
 import secrets
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import humanize
 from croniter import croniter
-from flask import (Flask, abort, flash, redirect, render_template, request,
-                   session, url_for)
+from flask import (Flask, Response, abort, flash, redirect, render_template,
+                   request, session, url_for)
 from toolforge_weld.api_client import ToolforgeClient
 from toolforge_weld.kubernetes_config import Kubeconfig
 
 import config
-from src import run_state
+from panel import commons
+from src import run_state, wayback
 
 API_SERVER = 'https://api.svc.tools.eqiad1.wikimedia.cloud:30003/jobs/v1'
 
@@ -43,6 +48,29 @@ NEVER_FIRES = '0 0 31 2 *'
 
 # Enough log to see a whole run without reading a week of history into memory.
 LOG_TAIL_BYTES = 60_000
+
+# Hosts the source-image proxy will fetch from. Without this allowlist the
+# endpoint would be an open proxy sitting inside Toolforge's network.
+SOURCE_HOSTS = frozenset({
+    'pressinform.gov.bd', 'pressinform.portal.gov.bd', 'web.archive.org'})
+SOURCE_HOST_SUFFIXES = ('.oraclecloud.com', '.oraclecloud15.com')
+MAX_SOURCE_BYTES = 12 * 1024 * 1024
+
+# The panel fetches source images itself because pressinform's certificate does
+# not validate; the bot already works around this with verify=False.
+# Short retries and short timeouts: this session serves <img> requests, so it
+# must fail fast rather than retry for a minute behind a spinning thumbnail.
+source_session = config.http_session(retries=1, backoff=0.3)
+SOURCE_TIMEOUT = 8
+
+_UNAVAILABLE_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 260'>"
+    "<rect width='400' height='260' fill='#f4f8fb'/>"
+    "<text x='200' y='122' text-anchor='middle' font-family='sans-serif' "
+    "font-size='15' fill='#47637c'>Original no longer published</text>"
+    "<text x='200' y='146' text-anchor='middle' font-family='sans-serif' "
+    "font-size='13' fill='#8ba2b8'>and no archive snapshot was found</text>"
+    "</svg>").encode()
 
 app = Flask(__name__)
 
@@ -340,6 +368,135 @@ def save_replacements():
     Path(path).write_text(request.form.get('text', ''), encoding='utf-8')
     flash('Replacements saved. They apply on the next run.')
     return redirect(url_for('replacements'))
+
+
+# ── Uploaded images ───────────────────────────────────────────────────────────
+
+@app.get('/partials/gallery')
+def partial_gallery():
+    """Lazy-loaded so a slow Commons fetch never delays the status card."""
+    try:
+        uploads = commons.recent_uploads(limit=24)
+        error = ''
+    except Exception as e:
+        app.logger.warning('Commons unreachable: %r', e)
+        uploads, error = [], "Couldn't reach Commons for the upload list."
+    return render_template('_gallery.html', uploads=uploads, error=error,
+                           thumb=commons.thumb_url, filepage=commons.file_page_url)
+
+
+@app.get('/upload/<unique_id>')
+def upload_detail(unique_id):
+    """Source image beside the cropped upload, with the text the bot read.
+
+    This is the only place the cropper's output can be checked without opening
+    Commons: if the separator was found in the wrong place, the two images side
+    by side show it immediately.
+    """
+    record = commons.find_upload(unique_id)
+    if not record:
+        abort(404, 'No upload recorded with that id.')
+    # htmx asks for the fragment; a plain click (or no JS) gets a whole page.
+    template = '_detail.html' if request.headers.get('HX-Request') else 'detail.html'
+    return render_template(template, record=record,
+                           detail=commons.detail_for(unique_id),
+                           thumb=commons.thumb_url,
+                           filepage=commons.file_page_url)
+
+
+def _allowed_source(url):
+    host = (urlparse(url).hostname or '').lower()
+    return host in SOURCE_HOSTS or host.endswith(SOURCE_HOST_SUFFIXES)
+
+
+@functools.lru_cache(maxsize=512)
+def _archived_copy(url, bucket):
+    """Wayback snapshot for a source image PID has removed, or ''.
+
+    Deliberately not wayback.get_wayback_url(): that helper rides the bot's
+    10-retry session with 30s timeouts, which is right for a batch job and far
+    too slow inside an image request. Cached per two-minute bucket so a dead
+    image costs one lookup, not one per page view.
+    """
+    try:
+        r = source_session.get('https://archive.org/wayback/available',
+                               params={'url': url}, timeout=6)
+        closest = r.json().get('archived_snapshots', {}).get('closest', {})
+        return closest.get('url') or ''
+    except Exception:
+        return ''
+
+
+@app.get('/source-image')
+def source_image():
+    """Proxy one source image, so the original can sit next to the crop.
+
+    Restricted to the hosts the bot actually scrapes; anything else is refused
+    rather than fetched.
+    """
+    url = request.args.get('url', '')
+    if not url or not _allowed_source(url):
+        abort(400, 'Not a PID source image.')
+
+    try:
+        upstream = source_session.get(url, timeout=SOURCE_TIMEOUT,
+                                      verify=False, stream=True)
+
+        # PID rotates images out of its object storage, which is the whole
+        # reason the bot archives them. Fall back to the snapshot, as
+        # image_processor.download_image already does on a 404.
+        if upstream.status_code == 404:
+            snapshot = _archived_copy(url, int(time.time() // 120))
+            if not snapshot:
+                raise ValueError('gone from PID, no snapshot')
+            upstream = source_session.get(snapshot, timeout=SOURCE_TIMEOUT,
+                                          verify=False, stream=True)
+
+        upstream.raise_for_status()
+        content_type = upstream.headers.get('Content-Type', 'image/jpeg')
+        if not content_type.startswith('image/'):
+            raise ValueError(f'not an image: {content_type}')
+        body = upstream.raw.read(MAX_SOURCE_BYTES + 1, decode_content=True)
+        if len(body) > MAX_SOURCE_BYTES:
+            raise ValueError('source image too large to preview')
+    except Exception as e:
+        app.logger.info('source image unavailable for %s: %r', url, e)
+        # A placeholder keeps the comparison laid out; a 502 would just leave a
+        # broken-image icon with no explanation of why.
+        return Response(_UNAVAILABLE_SVG, mimetype='image/svg+xml',
+                        headers={'Cache-Control': 'public, max-age=300'})
+
+    return Response(body, mimetype=content_type,
+                    headers={'Cache-Control': 'public, max-age=3600'})
+
+
+# ── Wayback queue ─────────────────────────────────────────────────────────────
+
+@app.get('/partials/wayback')
+def partial_wayback():
+    try:
+        with open(config.WAYBACK_QUEUE_PATH, encoding='utf-8') as f:
+            queue = json.load(f)
+        queue = queue if isinstance(queue, list) else []
+    except (OSError, ValueError):
+        queue = []
+    return render_template('_wayback.html', queue=queue,
+                           signed_in=signed_in())
+
+
+@app.post('/wayback/retry')
+@requires_token
+def wayback_retry():
+    """Confirm pending archives in the background.
+
+    A full pass can take minutes, which is far longer than a web request should
+    live, so it runs on a thread under a short budget and the page reports the
+    result on the next poll.
+    """
+    threading.Thread(target=wayback.retry_wayback_queue,
+                     kwargs={'budget_seconds': 60}, daemon=True).start()
+    flash('Confirming pending archives in the background.')
+    return redirect(url_for('index'))
 
 
 @app.get('/healthz')

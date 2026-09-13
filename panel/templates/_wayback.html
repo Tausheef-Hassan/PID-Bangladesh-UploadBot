@@ -1,0 +1,18 @@
+{% if not queue %}
+  <p class="prose">Nothing pending. Every source URL the bot submitted has been confirmed archived.</p>
+{% else %}
+  <p class="prose">
+    {{ queue|length }} URL{{ '' if queue|length == 1 else 's' }} submitted to the
+    Wayback Machine but not yet confirmed. The next run checks them
+    automatically; this only forces it sooner.
+  </p>
+  <div class="readout">
+    <pre class="logtext">{% for u in queue[:40] %}{{ u }}
+{% endfor %}{% if queue|length > 40 %}…and {{ queue|length - 40 }} more{% endif %}</pre>
+  </div>
+  {% if signed_in %}
+    <form method="post" action="{{ url_for('wayback_retry') }}" style="margin-top:0.9rem">
+      <button type="submit" class="quiet">Confirm them now</button>
+    </form>
+  {% endif %}
+{% endif %}

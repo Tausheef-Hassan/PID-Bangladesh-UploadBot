@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ record.filename }} — pid-bot</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+</head>
+<body>
+<main class="wrap">
+  <section class="card">
+    {% include '_detail.html' %}
+    <p style="margin-top:1.2rem"><a class="link" href="{{ url_for('index') }}">Back to the bot</a></p>
+  </section>
+</main>
+</body>
+</html>

@@ -32,6 +32,29 @@
   </section>
 
   <section class="card">
+    <h2>Recent uploads</h2>
+    <p class="hint">Pulled from the bot's own record on Commons. Refreshes every minute.</p>
+    <div hx-get="{{ url_for('partial_gallery') }}"
+         hx-trigger="load, every 60s" hx-swap="innerHTML">
+      <p class="hint">Loading…</p>
+    </div>
+  </section>
+
+  <section class="card" id="detail">
+    <h2>Image detail</h2>
+    <p class="hint">Pick an upload above to compare it against the original and
+      see the text the bot read off it.</p>
+  </section>
+
+  <section class="card">
+    <h2>Wayback queue</h2>
+    <div hx-get="{{ url_for('partial_wayback') }}"
+         hx-trigger="load, every 30s" hx-swap="innerHTML">
+      <p class="hint">Loading…</p>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Bengali replacements</h2>
     <p class="prose">
       These are applied to OCR text before it reaches the translator, so fixing

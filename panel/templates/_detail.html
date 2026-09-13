@@ -1,0 +1,32 @@
+<h2>{{ record.filename }}</h2>
+<p class="hint">
+  Uploaded {{ record.date[:16] or 'on an unrecorded date' }}.
+  <a class="link" href="{{ filepage(record.filename) }}">Open on Commons</a>
+</p>
+
+<div class="compare">
+  <figure>
+    <img src="{{ url_for('source_image', url=record.url) }}" alt="Original page image" loading="lazy">
+    <figcaption>Original, as published by PID</figcaption>
+  </figure>
+  <figure>
+    <img src="{{ thumb(record.filename, 640) }}" alt="Uploaded crop" loading="lazy">
+    <figcaption>What the bot uploaded, after cropping</figcaption>
+  </figure>
+</div>
+
+<p class="hint">
+  If the right-hand image still carries the Bengali caption band, or has lost
+  part of the photograph, the separator was found in the wrong place.
+</p>
+
+{% if detail %}
+  <div class="readout" style="margin-top:1rem">
+    <p class="stat-l">Text read from the image</p>
+    <p class="bn">{{ detail.ocr_text or '—' }}</p>
+    <p class="stat-l" style="margin-top:0.9rem">Translation used for the description</p>
+    <p>{{ detail.translation or '—' }}</p>
+  </div>
+{% else %}
+  <p class="hint">No logged detail for this image — the daily log only goes back a few days.</p>
+{% endif %}

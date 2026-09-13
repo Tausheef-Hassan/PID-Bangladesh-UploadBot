@@ -1,0 +1,23 @@
+{% if error %}
+  <p class="prose">{{ error }}</p>
+{% elif not uploads %}
+  <p class="prose">Nothing uploaded yet. Images appear here once a run succeeds.</p>
+{% else %}
+  <div class="grid">
+    {% for u in uploads %}
+      <figure class="shot">
+        {# href is the no-JS fallback and points at our own detail page, never
+           off to Commons; htmx intercepts it and swaps the fragment in place. #}
+        <a href="{{ url_for('upload_detail', unique_id=u.unique_id) }}"
+           hx-get="{{ url_for('upload_detail', unique_id=u.unique_id) }}"
+           hx-target="#detail" hx-swap="innerHTML show:#detail:top">
+          <img src="{{ thumb(u.filename, 320) }}" alt="{{ u.filename }}" loading="lazy">
+        </a>
+        <figcaption>{{ u.date[:10] or 'undated' }}</figcaption>
+      </figure>
+    {% endfor %}
+  </div>
+  <p class="hint" style="margin-top:0.9rem">
+    Newest first. Pick one to see the original beside the crop.
+  </p>
+{% endif %}

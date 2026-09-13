@@ -374,6 +374,52 @@ def test_read_only_views_stay_public():
             "controls must not render for a signed-out visitor"
 
 
+def test_source_proxy_refuses_hosts_it_does_not_scrape():
+    """The proxy sits inside Toolforge's network. Anything but the PID source
+    hosts must be refused, not fetched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        for hostile in (
+            "http://169.254.169.254/latest/meta-data/",   # cloud metadata
+            "http://127.0.0.1:5173/healthz",              # itself
+            "https://example.com/cat.jpg",
+            "https://pressinform.gov.bd.evil.test/x.jpg",  # suffix smuggling
+            "file:///etc/passwd",
+        ):
+            status = client.get("/source-image", query_string={"url": hostile}).status_code
+            assert status == 400, f"proxy accepted {hostile} ({status})"
+
+
+def test_source_proxy_allows_the_real_source_hosts():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        for ok in ("https://pressinform.gov.bd/a.jpg",
+                   "https://objectstorage.ap-dcc-gazipur-1.oraclecloud15.com/n/x/a.jpg",
+                   "https://web.archive.org/web/2026/https://pressinform.gov.bd/a.jpg"):
+            assert panel_app._allowed_source(ok), f"proxy would refuse {ok}"
+
+
+def test_wayback_retry_needs_the_key():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, token="correct-horse")
+        assert client.post("/wayback/retry").status_code == 403
+
+
+def test_gallery_survives_commons_being_down():
+    """Commons is a third party; the panel must degrade, not 500."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp)
+        broken = lambda *a, **k: (_ for _ in ()).throw(OSError("commons down"))
+        original = panel_app.commons.recent_uploads
+        panel_app.commons.recent_uploads = broken
+        try:
+            page = client.get("/partials/gallery")
+        finally:
+            panel_app.commons.recent_uploads = original
+        assert page.status_code == 200, "a Commons outage took the panel down"
+        assert b"reach Commons" in page.data, page.data[:200]
+
+
 def test_zero_upload_runs_still_draw_a_tick():
     """A quiet hour is information: it must not look like missing data."""
     ticks = panel_app.heartbeat([

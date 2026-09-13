@@ -51,7 +51,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--gutter); }
+.wrap { padding: 0 var(--gutter); }
+
+/* Reading-width is enforced on text, not on the page: the gallery and the
+ * side-by-side comparison want every pixel the screen has. */
+.prose, .aside { max-width: 66ch; }
 
 /* Panels: one white surface per idea, never nested. */
 .card {
@@ -254,7 +258,6 @@ input:focus, textarea:focus { border-color: var(--accent); outline: none; box-sh
 .notices {
   list-style: none;
   margin: 1.4rem auto 0;
-  max-width: 1120px;
   padding: 0.7rem 1rem;
   background: var(--ok-bg);
   color: var(--ok-text);
@@ -276,3 +279,35 @@ code { font-family: var(--mono); font-size: 0.88em; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ── Uploaded images ───────────────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.shot { margin: 0; }
+.shot a { display: block; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); background: var(--surface-alt); }
+.shot img { display: block; width: 100%; height: 130px; object-fit: cover; }
+.shot a:hover { border-color: var(--accent); }
+.shot figcaption { font-size: 0.75rem; color: var(--muted); padding-top: 0.35rem; }
+
+/* Side by side while there is room, stacked when there is not. */
+.compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.2rem;
+  margin-top: 0.6rem;
+}
+.compare figure { margin: 0; }
+.compare img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+}
+.compare figcaption { font-size: 0.8rem; color: var(--muted); padding-top: 0.4rem; }
+
+.bn { font-family: var(--bn), var(--sans); font-size: 1rem; line-height: 1.75; margin: 0.2rem 0 0; }
