@@ -69,6 +69,17 @@
           <input id="caption" name="caption" value="{{ caption }}"
                  placeholder="{% if not caption %}No caption set{% endif %}">
 
+          {# The Bengali sits directly above the English because the whole task
+             is comparing the two. Read-only: it is OCR of the source caption,
+             not something to rewrite while reviewing a translation. #}
+          {% if bengali %}
+            <span class="stat-l">Bengali, from the caption band</span>
+            <p class="bn-source" lang="bn">{{ bengali }}</p>
+          {% else %}
+            <p class="hint">No Bengali on this page, so there is nothing to
+              check the translation against here.</p>
+          {% endif %}
+
           <label for="english" class="stat-l">English description</label>
           <textarea id="english" name="english" rows="7">{{ english }}</textarea>
 

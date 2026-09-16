@@ -916,6 +916,36 @@ def test_username_suggestions_are_owner_only_and_come_from_commons():
         assert b"No account" in owner.get("/users/suggest?user=T").data
 
 
+
+def test_the_bengali_is_readable_even_when_the_english_is_not():
+    """It is what the translation gets checked against, so a page whose English
+    half cannot be parsed must still show it.
+
+    Compared NFC-normalised, and not as a nicety: Bengali য় exists both
+    precomposed (U+09DF) and as য + nukta (U+09AF U+09BC). They render
+    identically, so a literal written by hand can differ from OCR output in a
+    way no one can see.
+    """
+    import unicodedata
+
+    def same(a, b):
+        return unicodedata.normalize("NFC", a) == unicodedata.normalize("NFC", b)
+
+    expected = "আজ ঢাকায় সভা।"
+    assert same(wikitext.read_bengali(PAGE), expected), wikitext.read_bengali(PAGE)
+
+    broken = "{{bn|1=" + expected + "}}{{en|1=unclosed"
+    try:
+        wikitext.read_english(broken)
+        raise AssertionError("that English should not have parsed")
+    except wikitext.Unparseable:
+        pass
+    assert same(wikitext.read_bengali(broken), expected), "Bengali lost with the English"
+
+    assert wikitext.read_bengali("no templates here") == "", "absent Bengali is not an error"
+    assert wikitext.read_bengali(None) == ""
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

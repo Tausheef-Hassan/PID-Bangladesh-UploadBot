@@ -785,3 +785,19 @@ button.suggest:focus-visible { background: var(--surface-alt); color: var(--acce
 .grant label { width: 100%; }
 .grant .suggestbox { flex: 1 1 14rem; display: block; }
 .grant input { width: 100%; }
+
+/* The Bengali is the thing being checked against, not a field. Quiet surface,
+   generous line-height — Bengali conjuncts need the room to stay legible. */
+.bn-source {
+  margin: 0 0 0.2rem;
+  padding: 0.7rem 0.9rem;
+  font-family: var(--bn);
+  font-size: 0.95rem;
+  line-height: 1.95;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 14rem;
+  overflow-y: auto;
+}

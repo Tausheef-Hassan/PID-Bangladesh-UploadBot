@@ -75,6 +75,21 @@ def read_english(text):
     return inner.replace(MARKER, '').strip(), marked
 
 
+def read_bengali(text):
+    """The Bengali OCR text, or ''.
+
+    Lenient where read_english is strict: this is the thing you check the
+    translation against, so a page that has it should show it even when the
+    English half is in a shape the editor cannot parse. No Bengali at all is a
+    fact about the file, not an error.
+    """
+    span = _template_span(text or '', '{{bn|1=')
+    if span is None:
+        return ''
+    start, end = span
+    return text[start + len('{{bn|1='):end - 2].strip()
+
+
 def write_english(text, english, mark_auto_translated):
     """Replace the English description, and set or clear the marker."""
     span = _template_span(text, '{{en|1=')

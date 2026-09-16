@@ -331,8 +331,9 @@ you press it.
 
 ### Reviewing descriptions from the panel
 
-Each upload's detail view can correct the English description and add topic
-categories on Commons. The bot writes
+Each upload's detail view shows the Bengali caption text above the English, so
+the translation can be checked against its source without leaving the page, and
+can correct the English description and add topic categories on Commons. The bot writes
 `{{en|1=<translation>{{Auto-translated PID English description}}}}`; the
 **Description is fine** button removes that marker and moves to the next file,
 because once a person has verified it, it is no longer auto-translated. Plain

@@ -815,7 +815,7 @@ def file_detail(title):
     position = titles.index(title) if title in titles else None
 
     page = wikiauth.fetch_wikitext(title)
-    english, auto_translated, categories = '', True, []
+    english, auto_translated, categories, bengali = '', True, [], ''
     parse_error, source_url, existing_tag = '', '', ''
     if page is None:
         parse_error = "Couldn't read the page from Commons."
@@ -827,6 +827,7 @@ def file_detail(title):
         # description — common in the 2015-2024 backlog — must not take the
         # category editor down with it.
         categories = wikitext.read_categories(page)
+        bengali = wikitext.read_bengali(page)
         try:
             english, auto_translated = wikitext.read_english(page)
         except wikitext.Unparseable as e:
@@ -850,7 +851,7 @@ def file_detail(title):
 
     return render_template(
         'file.html', title=title, filename=title[len('File:'):],
-        english=english, auto_translated=auto_translated,
+        english=english, auto_translated=auto_translated, bengali=bengali,
         categories="\n".join(categories), editable_categories=editable,
         locked_categories=locked, parse_error=parse_error,
         source_url=source_url, caption=commons.caption(title, bucket),
