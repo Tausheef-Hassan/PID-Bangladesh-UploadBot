@@ -243,3 +243,21 @@ def suggest_categories(prefix, bucket, limit=10):
     titles = data[1] if isinstance(data, list) and len(data) > 1 else []
     return tuple(t[len('Category:'):] for t in titles
                  if t.startswith('Category:'))
+
+
+@lru_cache(maxsize=256)
+def suggest_users(prefix, bucket, limit=10):
+    """Commons accounts starting with `prefix`.
+
+    Only accounts that exist on Commons are offered, and that is the right set:
+    signing in to this panel goes through Commons, so granting access to an
+    account that has never been here would grant nothing at all.
+    """
+    prefix = (prefix or '').strip()
+    if len(prefix) < 2:
+        return ()
+    # MediaWiki capitalises the first letter of every username, so a lowercase
+    # prefix would quietly match nothing.
+    prefix = prefix[0].upper() + prefix[1:]
+    data = _api(list='allusers', auprefix=prefix, aulimit=limit)
+    return tuple(u['name'] for u in data.get('query', {}).get('allusers', []))

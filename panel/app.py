@@ -933,9 +933,25 @@ def suggest_categories():
     the suggestions share the same two-minute cache as everything else here.
     """
     return render_template(
-        '_catsuggest.html',
+        '_suggest.html',
         names=commons.suggest_categories(request.args.get('q', ''),
-                                         commons._bucket()))
+                                         commons._bucket()),
+        empty_message='No category by that name on Commons.')
+
+
+@app.get('/users/suggest')
+@requires_owner
+def suggest_users():
+    """Commons accounts matching what the owner is typing.
+
+    Behind the same gate as granting itself: only the owner ever sees the field,
+    so there is no reason for this to be one more endpoint the world can ask.
+    """
+    return render_template(
+        '_suggest.html',
+        names=commons.suggest_users(request.args.get('user', ''),
+                                    commons._bucket()),
+        empty_message='No account by that name on Commons.')
 
 
 @app.post('/file/<path:title>/tag')

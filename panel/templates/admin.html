@@ -41,12 +41,36 @@
       {% if is_owner %}
         <form method="post" class="grant">
           <label for="user" class="stat-l">Wikimedia username</label>
-          <input id="user" name="user" placeholder="R1F4T" autocomplete="off" required>
+          <span class="suggestbox">
+            <input id="user" name="user" placeholder="R1F4T" autocomplete="off" required
+                   hx-get="{{ url_for('suggest_users') }}"
+                   hx-trigger="keyup changed delay:250ms"
+                   hx-target="#suggest" hx-swap="innerHTML"
+                   hx-params="user">
+            <div id="suggest" class="suggest-list"></div>
+          </span>
           <button type="submit">Give access</button>
         </form>
-        <p class="hint">They sign in with their own Wikimedia account — there is
-          no password to send them. Removing someone takes effect on their next
-          click.</p>
+        <p class="hint">Suggestions are accounts that exist on Commons, so a
+          misspelled name cannot be granted access it would never use. They sign
+          in with their own Wikimedia account — there is no password to send
+          them. Removing someone takes effect on their next click.</p>
+
+        <script>
+          // Picking a suggestion fills the field rather than submitting: giving
+          // someone access should take a deliberate second click.
+          (function () {
+            var list = document.getElementById('suggest');
+            var input = document.getElementById('user');
+            if (!list) return;
+            list.addEventListener('click', function (e) {
+              if (!e.target.classList.contains('suggest')) return;
+              input.value = e.target.dataset.name;
+              list.innerHTML = '';
+              input.focus();
+            });
+          })();
+        </script>
       {% elif is_maintainer %}
         <p class="hint">Only {{ owner }} can change this list.</p>
       {% endif %}

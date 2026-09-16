@@ -403,8 +403,10 @@ Job controls (run, pause, stop, replacements, wayback retry) need an account
 that has been given access, because OAuth proves who you are and never that you
 may operate this tool.
 
-Access is managed from **Access** in the panel, not from the bastion. One
-envvar sets the root of trust; everyone else is added from the web:
+Access is managed from **Access** in the panel, not from the bastion. The
+username field suggests accounts that exist on Commons, so a misspelling cannot
+be granted access it would never use. One envvar sets the root of trust;
+everyone else is added from the web:
 
 ```bash
 toolforge envvars create PANEL_OWNER      # your Wikimedia username

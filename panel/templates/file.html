@@ -88,9 +88,9 @@
             <input id="catinput" autocomplete="off" placeholder="Add a category"
                    hx-get="{{ url_for('suggest_categories') }}"
                    hx-trigger="keyup changed delay:250ms"
-                   hx-target="#catsuggest" hx-swap="innerHTML"
+                   hx-target="#suggest" hx-swap="innerHTML"
                    hx-params="q" name="q">
-            <div id="catsuggest" class="catsuggest-list"></div>
+            <div id="suggest" class="suggest-list"></div>
           </div>
           <p class="hint">Suggestions come from Commons, so anything listed
             already exists. Greyed categories are added by the templates.</p>
@@ -183,7 +183,7 @@
     var box = document.getElementById('cats');
     var field = document.getElementById('categories');
     var input = document.getElementById('catinput');
-    var list = document.getElementById('catsuggest');
+    var list = document.getElementById('suggest');
     if (!box || !field) return;
 
     function sync() {
@@ -216,7 +216,7 @@
     });
 
     list.addEventListener('click', function (e) {
-      if (!e.target.classList.contains('catsuggest')) return;
+      if (!e.target.classList.contains('suggest')) return;
       add(e.target.dataset.name);
       input.value = '';
       list.innerHTML = '';
@@ -228,7 +228,7 @@
     input.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      var first = list.querySelector('.catsuggest');
+      var first = list.querySelector('.suggest');
       add(first ? first.dataset.name : input.value);
       input.value = '';
       list.innerHTML = '';

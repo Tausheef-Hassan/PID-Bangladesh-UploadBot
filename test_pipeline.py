@@ -885,6 +885,23 @@ def test_a_failed_oauth_step_reports_what_mediawiki_said():
     assert ok["username"] == "RIFAT712", "a good reply must pass straight through"
 
 
+
+def test_username_suggestions_are_owner_only_and_come_from_commons():
+    """Granting is owner-only, so the field feeding it should not be one more
+    endpoint the world can ask about Commons accounts."""
+    with tempfile.TemporaryDirectory() as tmp:
+        panel_app.commons.suggest_users = lambda prefix, bucket, limit=10: (
+            ("Tauseef 745", "Tauseef Ahmad") if len(prefix.strip()) >= 2 else ())
+
+        stranger = _panel_client(tmp, owner="RIFAT712", signed_in_as="Nobody")
+        assert stranger.get("/users/suggest?user=Tau").status_code == 403
+
+        owner = _panel_client(tmp, owner="RIFAT712", signed_in_as="RIFAT712")
+        body = owner.get("/users/suggest?user=Tau").data
+        assert b"Tauseef Ahmad" in body, body[:200]
+        assert b"No account" in owner.get("/users/suggest?user=T").data
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
