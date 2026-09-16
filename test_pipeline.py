@@ -847,6 +847,41 @@ def test_a_callback_with_the_wrong_state_is_refused():
             assert "wiki_user" not in s, "a forged callback signed someone in"
 
 
+
+def test_a_failed_oauth_step_reports_what_mediawiki_said():
+    """The first version swallowed the reason and said only that a field was
+    missing, which is the least useful thing it could have reported."""
+    from panel import wikiauth
+
+    class Reply:
+        def __init__(self, payload, status=200):
+            self._payload, self.status_code = payload, status
+
+        def json(self):
+            return self._payload
+
+    for payload, status, expected in [
+        ({"errorKey": "mwoauth-invalid-authorization",
+          "messageTranslations": {"en": "The authorization headers in your "
+                                        "request are not valid"},
+          "httpCode": 403}, 403, "authorization headers"),
+        ({"error": "access_denied",
+          "error_description": "The resource owner or authorization server "
+                               "denied the request.",
+          "hint": 'Missing "Bearer" token'}, 401, "denied the request"),
+    ]:
+        try:
+            wikiauth._rest_json(Reply(payload, status), "Reading your profile")
+        except RuntimeError as e:
+            assert expected in str(e), f"lost the reason: {e}"
+            assert "Reading your profile" in str(e), f"lost the step: {e}"
+            continue
+        raise AssertionError(f"an HTTP {status} error was treated as success")
+
+    ok = wikiauth._rest_json(Reply({"username": "RIFAT712"}), "Reading your profile")
+    assert ok["username"] == "RIFAT712", "a good reply must pass straight through"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

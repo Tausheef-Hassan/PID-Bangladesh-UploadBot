@@ -69,6 +69,39 @@ def consumer():
     return (key, secret) if key and secret else None
 
 
+def _rest_json(response, what):
+    """Parse a rest.php reply, raising with MediaWiki's own words on failure.
+
+    Two error shapes come out of these endpoints and neither looks like the
+    success body, so without this every failure reads as "the field I wanted
+    was missing" and the real reason never reaches the person signing in:
+
+      {"error": "access_denied", "error_description": "...", "hint": "..."}
+      {"errorKey": "mwoauth-invalid-authorization",
+       "messageTranslations": {"en": "..."}, "httpCode": 403}
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        raise RuntimeError(
+            f'{what}: Wikimedia returned {response.status_code} and no JSON.')
+
+    if not isinstance(body, dict):
+        raise RuntimeError(f'{what}: unexpected reply from Wikimedia.')
+
+    detail = (body.get('messageTranslations', {}).get('en')
+              or body.get('error_description')
+              or body.get('hint')
+              or body.get('errorKey')
+              or body.get('error')
+              or body.get('message'))
+    if detail or response.status_code >= 400:
+        raise RuntimeError(
+            f'{what}: {detail or response.status_code} '
+            f'(HTTP {response.status_code})')
+    return body
+
+
 def start(redirect_uri):
     """Begin the handshake. Returns (authorize_url, state).
 
@@ -96,19 +129,16 @@ def finish(code, redirect_uri):
         raise RuntimeError('Wikimedia sign-in is not configured on this tool.')
     client_id, client_secret = pair
 
-    payload = session.post(
+    payload = _rest_json(session.post(
         TOKEN_URL, timeout=20, headers={'User-Agent': USER_AGENT},
         data={'grant_type': 'authorization_code',
               'code': code,
               'client_id': client_id,
               'client_secret': client_secret,
-              'redirect_uri': redirect_uri}).json()
+              'redirect_uri': redirect_uri}), 'Exchanging the code')
 
     if 'access_token' not in payload:
-        raise RuntimeError(payload.get('message')
-                           or payload.get('error_description')
-                           or payload.get('error')
-                           or 'Wikimedia did not issue a token.')
+        raise RuntimeError('Wikimedia did not issue a token.')
 
     # ponytail: the refresh token is deliberately dropped. Both tokens are long
     # JWTs and the session is a 4 KB signed cookie, so keeping both risks the
@@ -118,10 +148,14 @@ def finish(code, redirect_uri):
     token = {'access_token': payload['access_token'],
              'expires_at': time.time() + int(payload.get('expires_in', 14400))}
 
-    who = session.get(PROFILE_URL, timeout=20, headers=_headers(token)).json()
+    who = _rest_json(session.get(PROFILE_URL, timeout=20,
+                                 headers=_headers(token)), 'Reading your profile')
     username = who.get('username')
     if not username:
-        raise RuntimeError('Wikimedia did not say who signed in.')
+        # A 200 with no username means the shape changed, not that the sign-in
+        # was refused; naming the fields we did get is what makes that legible.
+        raise RuntimeError('Wikimedia did not say who signed in. It returned: '
+                           + ', '.join(sorted(who)[:8]))
     return token, username
 
 
