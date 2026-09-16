@@ -30,7 +30,14 @@ import config
 
 # OAuth 2.0 lives under rest.php, not the 1.0a endpoints on index.php. A 1.0a
 # handshake against a 2.0 consumer is what "Wrong OAuth version, E012" means.
-OAUTH2 = 'https://meta.wikimedia.org/w/rest.php/oauth2'
+#
+# The handshake runs on Commons, not meta, because the consumer is registered
+# for commonswiki alone. Meta will still issue a token for it, but every other
+# wiki's resource endpoint then refuses that token — "The authorization headers
+# in your request are not valid for metawiki" — which is a confusing way to
+# find out you asked the wrong wiki. Commons is also the only wiki this tool
+# edits. Registration itself still happens at meta; only the flow moves.
+OAUTH2 = 'https://commons.wikimedia.org/w/rest.php/oauth2'
 AUTHORIZE_URL = f'{OAUTH2}/authorize'
 TOKEN_URL = f'{OAUTH2}/access_token'
 PROFILE_URL = f'{OAUTH2}/resource/profile'

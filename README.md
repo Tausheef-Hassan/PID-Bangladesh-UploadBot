@@ -365,8 +365,16 @@ once:
    | Grants | **Edit existing pages**, plus **Edit structured data** for captions |
 
    The callback is compared character for character, so it must match the tool
-   URL exactly. The panel speaks 2.0 against `meta.wikimedia.org/w/rest.php/oauth2`;
-   pointing it at a 1.0a consumer fails with `Wrong OAuth version, E012`.
+   URL exactly. Pointing the panel at a 1.0a consumer fails with
+   `Wrong OAuth version, E012`.
+
+   Registration happens at meta, but the **handshake runs on Commons** —
+   `commons.wikimedia.org/w/rest.php/oauth2`. A consumer scoped to commonswiki
+   gets a token from meta quite happily and is then refused by meta's own
+   resource endpoint: *The authorization headers in your request are not valid
+   for metawiki*. Applying the consumer to all projects instead would also
+   work, but this tool only ever edits Commons, so the narrower scope is the
+   right one to keep.
 
 2. Once approved, store the consumer as **envvars**, which keeps it off NFS
    entirely:

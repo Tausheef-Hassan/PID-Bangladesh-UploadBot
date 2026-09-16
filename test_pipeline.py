@@ -828,6 +828,9 @@ def test_oauth2_authorize_url_carries_what_mediawiki_needs():
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     assert parsed.path.endswith("/rest.php/oauth2/authorize"), url
+    # A commonswiki-only consumer is refused everywhere else, and meta issues a
+    # token anyway — so the wiki is load-bearing, not cosmetic.
+    assert parsed.netloc == "commons.wikimedia.org",         f"handshake must run on the wiki the consumer is for, got {parsed.netloc}"
     assert query["response_type"] == ["code"], query
     assert query["client_id"] == ["client-id"]
     assert query["redirect_uri"] == ["https://tool.example/oauth/callback"]
