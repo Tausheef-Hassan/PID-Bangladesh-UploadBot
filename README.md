@@ -357,8 +357,14 @@ once:
 
 1. Propose a consumer at
    [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose)
-   with callback `https://<tool>.toolforge.org/oauth/callback` and the grant
-   **Edit existing pages** — nothing more is needed.
+   with callback `https://<tool>.toolforge.org/oauth/callback` and the grants
+   **Edit existing pages** and **Edit structured data** (the second is only
+   needed for captions; descriptions and copyright flags work without it).
+
+   Leave **"Allow consumer to specify a callback in requests"** unticked. The
+   panel sends `oauth_callback=oob` and lets MediaWiki redirect to the callback
+   above — a consumer registered without that box refuses anything else, with
+   `oauth_callback must be set, and must be set to "oob"`.
 2. Once approved, store the consumer as **envvars**, which keeps it off NFS
    entirely:
    ```bash

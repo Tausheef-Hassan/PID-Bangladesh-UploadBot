@@ -811,6 +811,30 @@ def test_category_suggestions_come_from_commons_and_stay_quiet_when_short():
         assert asked == ["Dha", "D"]
 
 
+
+def test_oauth_handshake_asks_for_the_oob_callback():
+    """A consumer registered without "allow consumer to specify a callback"
+    rejects anything but oob, and MediaWiki then uses the callback stored on
+    the registration. Only live MediaWiki says so, hence this check."""
+    from panel import wikiauth
+    seen = {}
+
+    def fake_initiate(uri, token, callback='oob', **kw):
+        seen["callback"] = callback
+        return "https://meta.example/authorize", ("req-key", "req-secret")
+
+    real_initiate, real_consumer = wikiauth.initiate, wikiauth.consumer
+    wikiauth.initiate = fake_initiate
+    wikiauth.consumer = lambda: type("T", (), {"key": "k", "secret": "s"})()
+    try:
+        url, token = wikiauth.start()
+    finally:
+        wikiauth.initiate, wikiauth.consumer = real_initiate, real_consumer
+
+    assert seen["callback"] == "oob",         f"sent {seen['callback']!r}; MediaWiki refuses anything but 'oob' here"
+    assert token == ("req-key", "req-secret")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

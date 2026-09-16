@@ -8,7 +8,9 @@
 # Set up once, as the tool maintainer:
 #   1. https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose
 #      Callback:  https://<tool>.toolforge.org/oauth/callback
-#      Grants:    "Edit existing pages"  (nothing more is needed)
+#      Grants:    "Edit existing pages", plus "Edit structured data" for captions
+#      Leave "Allow consumer to specify a callback in requests" unticked — see
+#      start() below for why.
 #   2. Store the approved consumer as envvars, which keeps it off NFS:
 #        toolforge envvars create OAUTH_CONSUMER_KEY     # paste, then Ctrl-D
 #        toolforge envvars create OAUTH_CONSUMER_SECRET
@@ -60,12 +62,20 @@ def consumer():
     return ConsumerToken(key, secret) if key and secret else None
 
 
-def start(callback_url):
-    """Begin the handshake. Returns (redirect_url, request_token_tuple)."""
+def start():
+    """Begin the handshake. Returns (redirect_url, request_token_tuple).
+
+    The callback is `oob`, not our own URL. A consumer registered without
+    "Allow consumer to specify a callback in requests" refuses anything else —
+    `oauth_callback must be set, and must be set to "oob"` — and MediaWiki then
+    redirects to the callback stored on the registration, which is the one we
+    want anyway. Sending `oob` also works for a consumer that does allow a
+    dynamic callback, so it is the option that works in both cases.
+    """
     token = consumer()
     if token is None:
         raise RuntimeError('Wikimedia sign-in is not configured on this tool.')
-    redirect_url, request_token = initiate(MW_URI, token, callback=callback_url)
+    redirect_url, request_token = initiate(MW_URI, token, callback='oob')
     return redirect_url, tuple(request_token)
 
 

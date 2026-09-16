@@ -257,8 +257,7 @@ def nav_state():
 @app.get('/oauth/start')
 def oauth_start():
     try:
-        redirect_url, request_token = wikiauth.start(
-            url_for('oauth_callback', _external=True))
+        redirect_url, request_token = wikiauth.start()
     except Exception as e:
         flash(str(e))
         return redirect(url_for('index'))
