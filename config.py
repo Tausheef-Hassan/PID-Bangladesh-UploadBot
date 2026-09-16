@@ -70,7 +70,8 @@ FALLBACK_MODEL = "gemini-3.5-flash"
 # Credential files: $TOOL_DATA_DIR on Toolforge, SCRIPT_DIR locally
 GEMINI_CONFIG_PATH = os.path.join(CREDS_DIR, 'gemini.key')   # AI Studio free API key
 IA_KEY_PATH = os.path.join(CREDS_DIR, 'ia.key')              # Internet Archive S3-like keys
-PANEL_KEY_PATH = os.path.join(CREDS_DIR, 'panel.key')        # Shared secret for the control panel
+SECRET_KEY_PATH = os.path.join(CREDS_DIR, 'secret.key')      # Signs the panel's session cookie
+MAINTAINERS_PATH = os.path.join(CREDS_DIR, 'maintainers.json')  # Who the owner has granted panel access
 OAUTH_KEY_PATH = os.path.join(CREDS_DIR, 'oauth.key')        # Wikimedia OAuth consumer for panel edits
 WAYBACK_QUEUE_PATH = os.path.join(CREDS_DIR, 'wayback_pending.json')  # Persistent retry queue
 RUN_STATE_PATH = os.path.join(CREDS_DIR, 'run_state.json')   # Per-run outcomes, read by the panel

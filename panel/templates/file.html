@@ -72,24 +72,95 @@
           <label for="english" class="stat-l">English description</label>
           <textarea id="english" name="english" rows="7">{{ english }}</textarea>
 
-          <label class="check">
-            <input type="checkbox" name="reviewed" {% if not auto_translated %}checked{% endif %}>
-            I have checked this against the Bengali — drop the auto-translated marker
-          </label>
+          <label for="catinput" class="stat-l">Categories</label>
+          <div class="cats" id="cats">
+            {% for name in template_categories %}
+              <span class="cat cat-fixed" title="Added by a template — not editable here">{{ name }}</span>
+            {% endfor %}
+            {% for name in editable_categories %}
+              <span class="cat" data-name="{{ name }}">{{ name }}<button type="button"
+                    class="cat-x" aria-label="Remove {{ name }}">&times;</button></span>
+            {% endfor %}
+          </div>
+          <input type="hidden" name="categories" id="categories" value="{{ categories }}">
 
-          <label for="categories" class="stat-l">Topic categories, one per line</label>
-          <textarea id="categories" name="categories" rows="5"
-                    placeholder="Zubaida Rahman&#10;Bangladesh Innovation Fair 2026">{{ categories }}</textarea>
-          <p class="hint">Date and PID categories come from the templates and are not listed here.</p>
+          <div class="catadd">
+            <input id="catinput" autocomplete="off" placeholder="Add a category"
+                   hx-get="{{ url_for('suggest_categories') }}"
+                   hx-trigger="keyup changed delay:250ms"
+                   hx-target="#catsuggest" hx-swap="innerHTML"
+                   hx-params="q" name="q">
+            <div id="catsuggest" class="catsuggest-list"></div>
+          </div>
+          <p class="hint">Suggestions come from Commons, so anything listed
+            already exists. Greyed categories are added by the templates.</p>
 
+          <input type="hidden" name="next_title" value="{{ next_title or '' }}">
+
+          {# The commonest verdict by far is "the translation is fine", so it is
+             the one button you can hit without reading the others. #}
           <div class="editor-actions">
-            <button type="submit">Save</button>
+            {% if auto_translated %}
+              <button type="submit" name="action" value="clear-next">
+                Description is fine{% if next_title %} — next{% endif %}</button>
+            {% endif %}
+            <button type="submit" name="action" value="save"
+                    class="{% if auto_translated %}quiet{% endif %}">Save</button>
             {% if next_title %}
-              <button type="submit" name="next_title" value="{{ next_title }}"
+              <button type="submit" name="action" value="save-next"
                       class="quiet">Save and go to next</button>
             {% endif %}
           </div>
         </form>
+
+        {% if existing_tag %}
+          <p class="flagged">Flagged: {{ existing_tag }}. Resolve it on Commons
+            before flagging it again.</p>
+        {% else %}
+          <section class="flagbox">
+            <h3 class="flagbox-h">Flag a copyright problem</h3>
+            <form method="post" class="editor"
+                  action="{{ url_for('tag_file', title=title) }}">
+              <input type="hidden" name="queue" value="{{ queue }}">
+              <input type="hidden" name="month" value="{{ month }}">
+              <input type="hidden" name="offset" value="{{ offset }}">
+              <input type="hidden" name="cursor" value="{{ cursor }}">
+              <input type="hidden" name="next_title" value="{{ next_title or '' }}">
+
+              <label for="reason" class="stat-l">What is wrong with it</label>
+              <select id="reason" name="reason" required>
+                <option value="" selected disabled>Choose a reason</option>
+                <optgroup label="Add to the review list — nothing else happens">
+                  {% for key, (label, template, needs) in reasons.items() if not template %}
+                    <option value="{{ key }}" data-tier="review">{{ label }}</option>
+                  {% endfor %}
+                </optgroup>
+                <optgroup label="Tag on Commons — maintainers will act on it">
+                  {% for key, (label, template, needs) in reasons.items() if template %}
+                    <option value="{{ key }}" data-tier="commons"
+                            {% if needs %}data-note="1"{% endif %}
+                            {% if key == confirm_reason %}data-confirm="1"{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </optgroup>
+              </select>
+
+              <label for="note" class="stat-l">Why — kept in the edit summary</label>
+              <input id="note" name="note"
+                     placeholder="Agency photograph, credited to AFP on the source page">
+
+              <p id="confirmrow" class="flagconfirm" hidden>
+                This nominates the file for speedy deletion and an administrator
+                may act within hours. Type <code>{{ filename }}</code> to confirm.
+                <input name="confirm" placeholder="Type the filename to confirm"
+                       autocomplete="off" spellcheck="false">
+              </p>
+
+              <div class="editor-actions">
+                <button type="submit" class="danger" id="flagbtn">Flag this file</button>
+              </div>
+            </form>
+          </section>
+        {% endif %}
       {% endif %}
     </div>
   </div>
@@ -104,6 +175,85 @@
              : e.key === 'ArrowRight' ? document.getElementById('nextlink') : null;
     if (link) { e.preventDefault(); window.location = link.href; }
   });
+
+  // Categories, HotCat-style: chips you can drop, and an add box whose
+  // suggestions all exist on Commons. The hidden field stays the one thing the
+  // form posts, so the save path never learned about any of this.
+  (function () {
+    var box = document.getElementById('cats');
+    var field = document.getElementById('categories');
+    var input = document.getElementById('catinput');
+    var list = document.getElementById('catsuggest');
+    if (!box || !field) return;
+
+    function sync() {
+      field.value = Array.prototype.map
+        .call(box.querySelectorAll('.cat[data-name]'), function (c) { return c.dataset.name; })
+        .join('\n');
+    }
+
+    function add(name) {
+      name = (name || '').trim();
+      if (!name || field.value.split('\n').indexOf(name) !== -1) return;
+      var chip = document.createElement('span');
+      chip.className = 'cat';
+      chip.dataset.name = name;
+      chip.textContent = name;
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'cat-x';
+      x.setAttribute('aria-label', 'Remove ' + name);
+      x.innerHTML = '&times;';
+      chip.appendChild(x);
+      box.appendChild(chip);
+      sync();
+    }
+
+    box.addEventListener('click', function (e) {
+      if (!e.target.classList.contains('cat-x')) return;
+      e.target.parentNode.remove();
+      sync();
+    });
+
+    list.addEventListener('click', function (e) {
+      if (!e.target.classList.contains('catsuggest')) return;
+      add(e.target.dataset.name);
+      input.value = '';
+      list.innerHTML = '';
+      input.focus();
+    });
+
+    // Enter adds what is typed rather than submitting the description form —
+    // a stray Return in this box should never save the page.
+    input.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var first = list.querySelector('.catsuggest');
+      add(first ? first.dataset.name : input.value);
+      input.value = '';
+      list.innerHTML = '';
+    });
+  })();
+
+  // The confirmation field only exists for the one flag an administrator can
+  // act on within hours. Showing it for every reason would teach people to
+  // type past it.
+  var reason = document.getElementById('reason');
+  if (reason) {
+    reason.addEventListener('change', function () {
+      var picked = reason.options[reason.selectedIndex];
+      var confirming = picked.dataset.confirm === '1';
+      var row = document.getElementById('confirmrow');
+      row.hidden = !confirming;
+      row.querySelector('input').required = confirming;
+      document.getElementById('note').required = picked.dataset.note === '1';
+      // The button names the consequence, because it is the last thing read
+      // before the edit goes through.
+      document.getElementById('flagbtn').textContent =
+        picked.dataset.tier === 'commons' ? 'Tag this file on Commons'
+                                          : 'Add to the review list';
+    });
+  }
 </script>
 
 {% endblock %}

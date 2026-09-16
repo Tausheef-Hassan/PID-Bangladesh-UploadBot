@@ -3,7 +3,7 @@
 # looked at without a Toolforge account.
 #
 #   python scripts/preview_panel.py
-#   -> http://127.0.0.1:5173   (panel key: devkey)
+#   -> http://127.0.0.1:5173
 #
 # Everything it writes goes to a temp directory, so this never touches the real
 # $TOOL_DATA_DIR, wayback queue, or credentials. The Jobs API is unreachable
@@ -26,7 +26,6 @@ os.environ['TOOL_NAME'] = 'pid-bangladesh-uploadbot2'
 
 import config  # noqa: E402  (must follow the env vars above)
 
-PANEL_KEY = 'devkey'
 UPLOAD_PATTERN = [0, 0, 3, 14, 9, 0, 21, 6, 11, 0, 2, 17]
 FAILED_AT = {9, 34}
 
@@ -93,11 +92,10 @@ def main():
     seed_runs()
     seed_log()
     seed_wayback()
-    pathlib.Path(config.PANEL_KEY_PATH).write_text(PANEL_KEY, encoding='utf-8')
+    pathlib.Path(config.SECRET_KEY_PATH).write_text('preview', encoding='utf-8')
 
     from panel import app as panel_app
     print(f"\n  Panel preview   http://127.0.0.1:5173")
-    print(f"  Panel key       {PANEL_KEY}")
     print(f"  Demo data       {DATA}\n")
     panel_app.app.run(host='127.0.0.1', port=5173,
                       debug=False, use_reloader=False)

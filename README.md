@@ -333,15 +333,24 @@ you press it.
 
 Each upload's detail view can correct the English description and add topic
 categories on Commons. The bot writes
-`{{en|1=<translation>{{Auto-translated PID English description}}}}`; ticking
-"I have checked this against the Bengali" removes that marker, because once a
-person has verified it, it is no longer auto-translated.
+`{{en|1=<translation>{{Auto-translated PID English description}}}}`; the
+**Description is fine** button removes that marker and moves to the next file,
+because once a person has verified it, it is no longer auto-translated. Plain
+**Save** never touches the marker — only the button that says so does.
 
-Maintenance categories are **not** editable here and are not shown: `{{Date-PID}}`
+Categories work like HotCat. Every category the file is in is shown as a chip,
+and typing offers suggestions fetched live from Commons — so a category that
+appears in the list is one that exists, which is what stops the backlog filling
+with red-linked typos. Suggestions are fetched server-side through
+`/categories/suggest`, sharing the same two-minute cache as the rest of the
+panel's Commons reads.
+
+Template-driven categories appear greyed and cannot be removed: `{{Date-PID}}`
 and `{{PD-BDGov-PID}}` call `Module:PIDCategoryHelper` and add
 `Category:PID-BD images from <Month Year>` and
-`Category:Bangladesh photographs taken on <date>` themselves. Only topic
-categories are hand-managed.
+`Category:Bangladesh photographs taken on <date>` themselves. They are shown
+because they are the categories someone would otherwise add again by hand — but
+only topic categories are written back to the page.
 
 Edits are attributed to **you**, not the bot, through Wikimedia OAuth. Set it up
 once:
@@ -371,9 +380,73 @@ matching — `{{en|1=…}}` contains nested templates. It refuses to save anythi
 it cannot parse confidently, and rejects descriptions or category names
 containing markup: leaving a page alone always beats writing a mangled one.
 
-**Auth:** reads are public; every write requires a secret — `$PANEL_KEY` if set,
-otherwise `panel.key` in `$TOOL_DATA_DIR`. **No key means the controls are
-disabled, not open.**
+**Auth:** one sign-in for everything, through Wikimedia OAuth. Reads are public.
+Commons edits need any signed-in account — they are published under that name.
+Job controls (run, pause, stop, replacements, wayback retry) need an account
+that has been given access, because OAuth proves who you are and never that you
+may operate this tool.
+
+Access is managed from **Access** in the panel, not from the bastion. One
+envvar sets the root of trust; everyone else is added from the web:
+
+```bash
+toolforge envvars create PANEL_OWNER      # your Wikimedia username
+toolforge envvars create SECRET_KEY       # random, signs the session cookie
+```
+
+The owner is the only account that can grant or revoke, and the only one the
+web UI cannot remove — so a maintainer whose session is stolen cannot lock the
+owner out or promote anyone. Grants live in `maintainers.json` in
+`$TOOL_DATA_DIR`, which the webservice writes itself; that file is a list of
+public usernames, never key material, which is why it can sit on NFS when a
+secret could not. Each entry records who granted it and when.
+
+The list is re-read on every request, so revoking someone takes effect on their
+next click. **No owner means the controls are off for everyone**, and an
+unreadable `maintainers.json` falls back to the owner alone — it fails closed.
+
+`SECRET_KEY` must be set and stable: it signs the session cookie, and both
+gunicorn workers have to agree on it or people get signed out at random. A
+`secret.key` file in `$TOOL_DATA_DIR` is the local-development fallback.
+
+`/healthz` reports which source each secret came from, so a deployment can be
+checked without exposing anything:
+
+```json
+{"ok": true, "oauth": "envvars", "secret_key": "envvars",
+ "owner_set": true, "maintainers": 2, "tool_data_dir": true}
+```
+
+Values are `envvars`, `file` or `missing` — names only, never key material. If
+this says `file` after running `toolforge envvars create`, the webservice has
+not been restarted, or a stale key file is shadowing the envvar.
+
+### Flagging copyright problems
+
+`{{PD-BDGov-PID}}` covers Bangladesh government works. The backlog also contains
+photographs of artwork, logos, screenshots and agency photos that it does not
+cover, so the workbench can flag one without leaving the panel. Two tiers:
+
+| Tier | What it writes | Who sees it |
+|---|---|---|
+| Add to the review list | `[[Category:PID files with copyright concerns]]` | only this tool's **Copyright flags** queue |
+| Tag on Commons | `{{No permission since}}`, `{{No license since}}`, `{{No source since}}`, `{{Wrong license}}`, `{{Copyvio}}` | Commons maintainers act on these |
+
+The review list is the safe default: nothing is nominated for deletion and the
+flag is one category edit to undo. `{{Copyvio}}` is a speedy-deletion
+nomination, so the panel will not send one until the filename is typed out.
+
+The reason is always recorded in the edit summary, and a file already carrying a
+flag cannot be flagged again — resolve the first one on Commons instead.
+
+`Category:PID files with copyright concerns` must exist on Commons before the
+first flag; the panel files into categories but never creates them. It is also
+treated as a template-driven category, so editing topic categories cannot
+silently remove a flag.
+
+Deliberately not built: full deletion requests (`{{Delete}}` plus a DR subpage
+plus the daily log listing) and uploader talk-page notifications. Both are
+multi-edit workflows that leave a mess on Commons when half-applied.
 
 ### Keeping secrets private on Toolforge
 
@@ -384,7 +457,8 @@ service, which stores values outside the shared filesystem — only the tool's
 code and its maintainers can read them, though the *names* are public:
 
 ```bash
-toolforge envvars create PANEL_KEY              # paste, then Ctrl-D
+toolforge envvars create SECRET_KEY             # paste, then Ctrl-D
+toolforge envvars create PANEL_OWNER            # your Wikimedia username
 toolforge envvars create OAUTH_CONSUMER_KEY
 toolforge envvars create OAUTH_CONSUMER_SECRET
 toolforge envvars list                          # names and values, as the tool
@@ -394,7 +468,7 @@ toolforge webservice buildservice restart       # pick up the new values
 If you keep secrets as files instead, restrict both the files and the directory:
 
 ```bash
-chmod 600 ~/oauth.key ~/panel.key ~/gemini.key ~/ia.key ~/JSON.json           ~/drive_token.json ~/user-password.py
+chmod 600 ~/oauth.key ~/secret.key ~/gemini.key ~/ia.key ~/JSON.json           ~/drive_token.json ~/user-password.py
 chmod 750 ~                     # stop other tools listing your home
 ls -l ~/*.key                   # expect -rw------- and the tool as owner
 ```

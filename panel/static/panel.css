@@ -630,3 +630,157 @@ main.wrap { padding-top: 0.2rem; }
   .editpane { position: static; }
   .monthpick { margin-left: 0; }
 }
+
+/* ── Copyright flags ───────────────────────────────────────────────────────
+   Always visible, so a copyright problem is something you notice rather than
+   something you go looking for. A hairline and a quiet heading keep it from
+   competing with the description editor above it. */
+.flagbox {
+  margin-top: 1.1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.flagbox-h {
+  margin: 0 0 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--bad-text);
+}
+
+.flagbox select { font: inherit; font-size: 0.88rem; }
+.flagbox optgroup { font-style: normal; color: var(--muted); }
+.flagbox option { color: var(--text); }
+
+/* Shown only for the flag an administrator can act on within hours, so it
+   reads as a stop rather than another field. */
+.flagconfirm {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--bad-text);
+  background: var(--bad-bg);
+  border-radius: var(--radius-sm);
+}
+
+.flagconfirm code { font-family: var(--mono); font-size: 0.82rem; }
+.flagconfirm input { margin-top: 0.5rem; }
+
+.flagged {
+  margin: 1.1rem 0 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Categories ────────────────────────────────────────────────────────────
+   A file is in its categories; it does not have a list of them in a box. The
+   chips say so, and the greyed ones say which are not yours to change. */
+.cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.2rem;
+}
+
+.cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.3rem 0.2rem 0.6rem;
+  color: var(--accent);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.cat-fixed {
+  padding-right: 0.6rem;
+  color: var(--muted);
+  background: transparent;
+  border-style: dashed;
+}
+
+.cat-x {
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.cat-x:hover { color: var(--bad-text); background: var(--bad-bg); }
+
+.catadd { position: relative; }
+
+/* The list floats so adding a category never pushes the buttons out from
+   under the cursor mid-review. */
+.catsuggest-list:not(:empty) {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  right: 0;
+  max-height: 13rem;
+  overflow-y: auto;
+  padding: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+
+button.catsuggest {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-weight: 400;
+  font-size: 0.84rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--text);
+  background: none;
+  border: 0;
+}
+
+button.catsuggest:hover,
+button.catsuggest:focus-visible { background: var(--surface-alt); color: var(--accent); }
+
+.catsuggest-empty { padding: 0.3rem 0.5rem; margin: 0; }
+
+/* A maintainer can stop the job, so the pill says which account carries that. */
+.account-pill.account-admin {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Access ────────────────────────────────────────────────────────────────
+   A list of people, not a table of records: the name is what you scan for, so
+   it leads and everything else is subordinate to it. */
+.people { list-style: none; margin: 1.2rem 0; padding: 0; }
+
+.person {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.8rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+}
+.person:last-child { border-bottom: 1px solid var(--border); }
+
+.person-name { font-weight: 600; }
+.person-role { font-size: 0.82rem; color: var(--muted); }
+.person form { margin: 0 0 0 auto; }
+.person-empty { color: var(--muted); font-size: 0.88rem; }
+
+.grant { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem; }
+.grant label { width: 100%; }
+.grant input { flex: 1 1 14rem; }

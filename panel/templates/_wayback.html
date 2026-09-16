@@ -9,7 +9,7 @@
     <pre class="logtext">{% for u in queue[:40] %}{{ u }}
 {% endfor %}{% if queue|length > 40 %}…and {{ queue|length - 40 }} more{% endif %}</pre>
   </div>
-  {% if signed_in %}
+  {% if is_maintainer %}
     <form method="post" action="{{ url_for('wayback_retry') }}" style="margin-top:0.9rem">
       <button type="submit" class="quiet">Confirm them now</button>
     </form>

@@ -15,30 +15,24 @@
 
     <div class="routes">
       {% for endpoint, label in [('index', 'Overview'), ('uploads', 'Review'),
-                                 ('queue', 'Queue'), ('replacements', 'Replacements')] %}
+                                 ('queue', 'Queue'), ('replacements', 'Replacements')]
+             + ([('admin', 'Access')] if is_maintainer else []) %}
         <a class="route {% if request.endpoint == endpoint %}active{% endif %}"
            href="{{ url_for(endpoint) }}">{{ label }}</a>
       {% endfor %}
     </div>
 
     <div class="account">
-      {% if not controls_enabled %}
-        <span class="account-pill">read-only</span>
-      {% elif signed_in %}
-        <span class="account-pill">signed in</span>
-        <form method="post" action="{{ url_for('sign_out') }}">
+      {% if wiki_user %}
+        <span class="account-pill{% if is_maintainer %} account-admin{% endif %}"
+              {% if is_maintainer %}title="Maintainer — can run the job"{% endif %}>{{ wiki_user }}</span>
+        <form method="post" action="{{ url_for('oauth_logout') }}">
           <button type="submit" class="quiet small">Sign out</button>
         </form>
-      {% else %}
-        <a class="route" href="{{ url_for('sign_in_page') }}">Sign in</a>
-      {% endif %}
-      {% if wiki_user %}
-        <span class="account-pill">{{ wiki_user }}</span>
-        <form method="post" action="{{ url_for('oauth_logout') }}">
-          <button type="submit" class="quiet small">Disconnect Commons</button>
-        </form>
       {% elif wiki_configured %}
-        <a class="route" href="{{ url_for('oauth_start') }}">Connect Commons</a>
+        <a class="route" href="{{ url_for('oauth_start') }}">Sign in with Wikimedia</a>
+      {% else %}
+        <span class="account-pill">read-only</span>
       {% endif %}
     </div>
   </div>

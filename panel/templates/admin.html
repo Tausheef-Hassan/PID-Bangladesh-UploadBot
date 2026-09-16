@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block title %}Access — pid-bot{% endblock %}
+{% block content %}
+
+  <section class="card">
+    <h2>Who can run this tool</h2>
+    <p class="prose">
+      Anyone signed in with a Wikimedia account can fix descriptions and
+      categories on Commons. Running, pausing and stopping the job is limited to
+      the people listed here.
+    </p>
+
+    {% if not owner %}
+      <p class="aside compact">No owner is set, so the controls are off for
+        everyone. Set <code>PANEL_OWNER</code> to a Wikimedia username and
+        restart the webservice.</p>
+    {% else %}
+      <ul class="people">
+        <li class="person">
+          <span class="person-name">{{ owner }}</span>
+          <span class="person-role">owner — set on the server, cannot be removed here</span>
+        </li>
+        {% for entry in granted %}
+          <li class="person">
+            <span class="person-name">{{ entry.user }}</span>
+            <span class="person-role">added by {{ entry.granted_by }}{% if entry.at %}
+              on {{ entry.at[:10] }}{% endif %}</span>
+            {% if is_owner %}
+              <form method="post">
+                <input type="hidden" name="action" value="revoke">
+                <input type="hidden" name="user" value="{{ entry.user }}">
+                <button type="submit" class="danger small">Remove</button>
+              </form>
+            {% endif %}
+          </li>
+        {% else %}
+          <li class="person person-empty">Nobody else yet.</li>
+        {% endfor %}
+      </ul>
+
+      {% if is_owner %}
+        <form method="post" class="grant">
+          <label for="user" class="stat-l">Wikimedia username</label>
+          <input id="user" name="user" placeholder="R1F4T" autocomplete="off" required>
+          <button type="submit">Give access</button>
+        </form>
+        <p class="hint">They sign in with their own Wikimedia account — there is
+          no password to send them. Removing someone takes effect on their next
+          click.</p>
+      {% elif is_maintainer %}
+        <p class="hint">Only {{ owner }} can change this list.</p>
+      {% endif %}
+    {% endif %}
+  </section>
+
+{% endblock %}

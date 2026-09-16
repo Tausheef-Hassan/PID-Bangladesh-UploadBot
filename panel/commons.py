@@ -201,3 +201,45 @@ def caption(title, bucket, lang='en'):
     data = _api(action='wbgetentities', ids=f'M{pid}')
     entity = (data.get('entities') or {}).get(f'M{pid}', {})
     return (entity.get('labels', {}).get(lang, {}) or {}).get('value', '')
+
+
+# ── Categories, for the HotCat-style editor ───────────────────────────────────
+#
+# Two different questions, two different API calls: what categories is this file
+# actually in (including the ones templates add, which are not in the wikitext at
+# all), and what categories exist that start like what someone is typing.
+
+@lru_cache(maxsize=256)
+def categories_of(title, bucket):
+    """Every category the rendered page lands in, template-driven ones included.
+
+    `wikitext.read_categories` can only see what is written on the page;
+    Module:PIDCategoryHelper adds the date and PID-BD categories at render time.
+    Showing both is what stops someone hand-adding a category they already have.
+    """
+    # Hidden categories are included on purpose: the PID-BD date categories that
+    # Module:PIDCategoryHelper adds are all hidden, and they are exactly the ones
+    # someone would otherwise add again by hand.
+    data = _api(prop='categories', titles=title, cllimit='max')
+    pages = data.get('query', {}).get('pages', [{}])
+    return tuple(c['title'][len('Category:'):]
+                 for c in (pages[0].get('categories') or []))
+
+
+@lru_cache(maxsize=512)
+def suggest_categories(prefix, bucket, limit=10):
+    """Existing Commons categories starting with `prefix`.
+
+    Suggestions come from Commons rather than from a local list, so a category
+    that comes back is one that exists — which is the check that stops the
+    backlog filling up with red-linked typos.
+    """
+    prefix = (prefix or '').strip()
+    if len(prefix) < 2:
+        return ()
+    data = _api(action='opensearch', search=f'Category:{prefix}',
+                namespace=14, limit=limit, redirects='resolve')
+    # opensearch answers [query, [titles], [descriptions], [urls]].
+    titles = data[1] if isinstance(data, list) and len(data) > 1 else []
+    return tuple(t[len('Category:'):] for t in titles
+                 if t.startswith('Category:'))

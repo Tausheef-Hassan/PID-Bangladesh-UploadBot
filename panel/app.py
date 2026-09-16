@@ -75,13 +75,14 @@ _UNAVAILABLE_SVG = (
 
 app = Flask(__name__)
 
-# Signing key for the session cookie. Derived from panel.key so it survives
-# restarts and is shared across gunicorn workers; random (logins drop on
-# restart) when no key is configured and the controls are disabled anyway.
-_key_material = os.environ.get('PANEL_KEY', '').strip()
+# Signing key for the session cookie. It must survive restarts and be identical
+# in every gunicorn worker: a per-process random key would sign each worker's
+# cookies differently and bounce people out at random. $SECRET_KEY first, then a
+# file for local development.
+_key_material = os.environ.get('SECRET_KEY', '').strip()
 if not _key_material:
     try:
-        _key_material = Path(config.PANEL_KEY_PATH).read_text(encoding='utf-8').strip()
+        _key_material = Path(config.SECRET_KEY_PATH).read_text(encoding='utf-8').strip()
     except OSError:
         pass
 app.secret_key = (hashlib.sha256(('panel-session:' + _key_material).encode()).digest()
@@ -141,34 +142,97 @@ def fetch_job():
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-def panel_token():
-    """The shared secret, re-read each time so it can be rotated without a
-    restart. Empty means the controls are switched off.
+def owner():
+    """The account that owns this tool, from $PANEL_OWNER.
 
-    $PANEL_KEY (set with `toolforge envvars create PANEL_KEY`) wins over the
-    file, so the secret need never sit on NFS where other tools can read it.
+    The root of trust, and the one thing the web UI cannot change. Everyone
+    else is granted access by the owner from /admin, so a maintainer whose
+    session is stolen cannot lock the owner out or promote anyone.
     """
-    from_env = os.environ.get('PANEL_KEY', '').strip()
-    if from_env:
-        return from_env
+    return _username(os.environ.get('PANEL_OWNER', ''))
+
+
+def granted():
+    """Maintainers the owner has added, newest last. [] if none or unreadable.
+
+    Kept as a file rather than an envvar because the tool has to write it at
+    runtime, and `toolforge envvars` needs credentials the webservice does not
+    have. That is safe here in a way it would not be for a secret: this is a
+    list of public usernames, so NFS being world-readable costs nothing.
+    """
     try:
-        return Path(config.PANEL_KEY_PATH).read_text(encoding='utf-8').strip()
-    except OSError:
-        return ''
+        data = json.loads(Path(config.MAINTAINERS_PATH).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+    return [e for e in data if isinstance(e, dict) and e.get('user')]
 
 
-def signed_in():
-    return bool(session.get('signed_in'))
+def save_granted(entries):
+    Path(config.MAINTAINERS_PATH).write_text(
+        json.dumps(entries, indent=1), encoding='utf-8')
 
 
-def requires_token(view):
-    """Gate a write. A missing panel.key disables controls — it never opens them."""
+def maintainers():
+    """Every account allowed to operate the job: the owner, plus the granted.
+
+    Re-read on every call, so revoking someone takes effect on their very next
+    click rather than at the next deploy. No owner means nobody, because the
+    safe direction to fail is closed: a Wikimedia account proves who you are,
+    never that you are allowed to stop this tool.
+
+    MediaWiki treats underscores and spaces in usernames as the same character,
+    so both sides are normalised before comparing.
+    """
+    people = {_username(e['user']) for e in granted()}
+    if owner():
+        people.add(owner())
+    return {p for p in people if p}
+
+
+def _username(name):
+    return (name or '').strip().replace('_', ' ')
+
+
+def current_user():
+    """The signed-in Wikimedia account, or ''."""
+    return _username(session.get('wiki_user'))
+
+
+def is_maintainer():
+    return bool(current_user()) and current_user() in maintainers()
+
+
+def is_owner():
+    return bool(owner()) and current_user() == owner()
+
+
+def requires_owner(view):
+    """Gate granting and revoking. Only the owner may change who has access."""
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
-        if not panel_token():
-            abort(503, 'Controls are off: no panel.key on the server.')
-        if not signed_in():
-            abort(403, 'Sign in to use the controls.')
+        if not owner():
+            abort(503, 'No PANEL_OWNER is set on the server.')
+        if not is_owner():
+            abort(403, 'Only the tool owner can change who has access.')
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def requires_maintainer(view):
+    """Gate a job control.
+
+    Three distinct answers, because they need three distinct fixes: the server
+    has no allowlist, you are not signed in, or you are signed in as someone
+    who is not a maintainer.
+    """
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not maintainers():
+            abort(503, 'Controls are off: no PANEL_OWNER set on the server.')
+        if not current_user():
+            abort(403, 'Sign in with your Wikimedia account to use the controls.')
+        if not is_maintainer():
+            abort(403, f'{current_user()} is not a maintainer of this tool.')
         return view(*args, **kwargs)
     return wrapped
 
@@ -176,17 +240,19 @@ def requires_token(view):
 @app.context_processor
 def nav_state():
     """Every page renders the navbar, so its state is global context."""
-    return {'signed_in': signed_in(),
-            'controls_enabled': bool(panel_token()),
-            'wiki_user': session.get('wiki_user'),
-            'wiki_configured': wikiauth.consumer() is not None}
+    return {'wiki_user': session.get('wiki_user'),
+            'wiki_configured': wikiauth.consumer() is not None,
+            'is_maintainer': is_maintainer(),
+            'is_owner': is_owner(),
+            'controls_enabled': bool(maintainers())}
 
 
 # ── Wikimedia OAuth ───────────────────────────────────────────────────────────
 #
-# Job controls are gated by panel.key: that is operating the tool's own
-# infrastructure. Commons edits are gated by OAuth instead, because they are
-# published under a person's name and should carry that person's identity.
+# One sign-in for everything. OAuth says who you are, which is what a Commons
+# edit needs — it is published under your name. Operating the job needs more
+# than that, so the maintainer allowlist above decides who may, and the same
+# session answers both questions.
 
 @app.get('/oauth/start')
 def oauth_start():
@@ -225,29 +291,6 @@ def oauth_logout():
     session.pop('wiki_token', None)
     session.pop('wiki_user', None)
     return redirect(url_for('uploads'))
-
-
-@app.get('/sign-in')
-def sign_in_page():
-    return render_template('signin.html')
-
-
-@app.post('/sign-in')
-def sign_in():
-    expected = panel_token()
-    supplied = request.form.get('token', '')
-    if expected and secrets.compare_digest(supplied, expected):
-        session['signed_in'] = True
-        session.permanent = True
-    else:
-        flash("That key didn't match.")
-    return redirect(url_for('index'))
-
-
-@app.post('/sign-out')
-def sign_out():
-    session.clear()
-    return redirect(url_for('index'))
 
 
 # ── Reading what the bot leaves behind ────────────────────────────────────────
@@ -442,7 +485,7 @@ def log_download():
 # ── Controls ──────────────────────────────────────────────────────────────────
 
 @app.post('/run')
-@requires_token
+@requires_maintainer
 def run_now():
     # The Jobs API spec for restart: "If the job is a cronjob, execute it right now."
     jobs_api().post(_job_url('/restart'), display_messages=False)
@@ -451,7 +494,7 @@ def run_now():
 
 
 @app.post('/pause')
-@requires_token
+@requires_maintainer
 def pause():
     job, _ = fetch_job()
     if not job:
@@ -463,7 +506,7 @@ def pause():
 
 
 @app.post('/resume')
-@requires_token
+@requires_maintainer
 def resume():
     schedule = session.pop('schedule_before_pause', None) or '@hourly'
     jobs_api().patch(_job_url(), json={'schedule': schedule}, display_messages=False)
@@ -472,7 +515,7 @@ def resume():
 
 
 @app.post('/stop')
-@requires_token
+@requires_maintainer
 def stop():
     """Delete the job, killing any pod mid-run.
 
@@ -499,12 +542,54 @@ def replacements():
 
 
 @app.post('/replacements')
-@requires_token
+@requires_maintainer
 def save_replacements():
     path = os.path.join(config.SCRIPT_DIR, 'translation_replacements.tsv')
     Path(path).write_text(request.form.get('text', ''), encoding='utf-8')
     flash('Replacements saved. They apply on the next run.')
     return redirect(url_for('replacements'))
+
+
+# ── Who has access ────────────────────────────────────────────────────────────
+
+@app.get('/admin')
+def admin():
+    """The owner's view of who can operate this tool.
+
+    Visible to any maintainer, so someone can see why they do or do not have
+    access; only the owner can change it.
+    """
+    return render_template('admin.html', owner=owner(), granted=granted())
+
+
+@app.post('/admin')
+@requires_owner
+def save_admin():
+    entries = granted()
+    name = _username(request.form.get('user', ''))
+    action = request.form.get('action', '')
+
+    if action == 'revoke':
+        kept = [e for e in entries if _username(e['user']) != name]
+        if len(kept) == len(entries):
+            flash(f'{name} was not on the list.')
+        else:
+            save_granted(kept)
+            flash(f'Removed {name}. They lose access on their next click.')
+        return redirect(url_for('admin'))
+
+    if not name:
+        flash('Type the Wikimedia username to add.')
+    elif name == owner():
+        flash('You are the owner; that access cannot be granted or taken away here.')
+    elif any(_username(e['user']) == name for e in entries):
+        flash(f'{name} already has access.')
+    else:
+        entries.append({'user': name, 'granted_by': current_user(),
+                        'at': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+        save_granted(entries)
+        flash(f'{name} can now run the job. They need to sign in with Wikimedia.')
+    return redirect(url_for('admin'))
 
 
 # ── Uploaded images ───────────────────────────────────────────────────────────
@@ -640,6 +725,13 @@ QUEUES = {
     'uncategorised': {
         'label': 'Needs categories',
         'blurb': 'In no topic category. Add what the photograph actually shows.',
+        'category': commons.UNCATEGORISED,
+    },
+    'flagged': {
+        'label': 'Copyright flags',
+        'blurb': 'Flagged here as a possible copyright problem. Nothing is '
+                 'nominated for deletion — these are waiting for a decision.',
+        'category': wikitext.CONCERNS_CATEGORY,
     },
     'month': {
         'label': 'Browse by month',
@@ -651,12 +743,13 @@ QUEUES = {
 def _queue_titles(queue, month, offset, cursor):
     """(titles, next_offset, next_cursor, total) for one page of a queue."""
     bucket = commons._bucket()
-    if queue == 'uncategorised':
-        titles, nxt = commons.category_page(commons.UNCATEGORISED, cursor, bucket)
-        return titles, None, nxt, commons.category_size(commons.UNCATEGORISED, bucket)
+
+    # Every queue but 'review' is a category; 'month' just picks its own.
+    target = QUEUES[queue].get('category')
     if queue == 'month':
         target = month or commons.month_categories(
             datetime.now(timezone.utc).year)[datetime.now(timezone.utc).month - 1]
+    if target:
         titles, nxt = commons.category_page(target, cursor, bucket)
         return titles, None, nxt, commons.category_size(target, bucket)
 
@@ -710,11 +803,12 @@ def file_detail(title):
 
     page = wikiauth.fetch_wikitext(title)
     english, auto_translated, categories = '', True, []
-    parse_error, source_url = '', ''
+    parse_error, source_url, existing_tag = '', '', ''
     if page is None:
         parse_error = "Couldn't read the page from Commons."
     else:
         source_url = wikitext.read_source_url(page)
+        existing_tag = wikitext.read_copyright_tag(page)
         try:
             english, auto_translated = wikitext.read_english(page)
             categories = wikitext.read_categories(page)
@@ -722,16 +816,27 @@ def file_detail(title):
             parse_error = 'Not in the shape the bot writes (%s), so the description is not editable here.' % e
 
     bucket = commons._bucket()
+
+    # The wikitext only knows the categories written on the page; the date and
+    # PID-BD ones are added by Module:PIDCategoryHelper at render time. Showing
+    # both is what stops someone hand-adding a category the file already has.
+    editable = [c.strip() for c in categories]
+    from_templates = [c for c in commons.categories_of(title, bucket)
+                      if c not in editable]
+
     return render_template(
         'file.html', title=title, filename=title[len('File:'):],
         english=english, auto_translated=auto_translated,
-        categories="\n".join(categories), parse_error=parse_error,
+        categories="\n".join(categories), editable_categories=editable,
+        template_categories=from_templates, parse_error=parse_error,
         source_url=source_url, caption=commons.caption(title, bucket),
         prev_title=titles[position - 1] if position else None,
         next_title=(titles[position + 1]
                     if position is not None and position + 1 < len(titles) else None),
         position=position, page_count=len(titles), total=total,
         queue=queue, month=month, offset=offset, cursor=cursor, queues=QUEUES,
+        existing_tag=existing_tag, reasons=wikitext.REASONS,
+        confirm_reason=wikitext.NEEDS_CONFIRMATION,
         thumb=commons.thumb_url, filepage=commons.file_page_url)
 
 
@@ -766,11 +871,20 @@ def save_file(title):
         except Exception as e:
             flash('Caption not saved: %s' % e)
 
+    # The marker is only ever cleared by the button that says so. A plain Save
+    # reads the page's own state rather than the form, so editing a description
+    # never silently drops a marker someone else still needs to see.
+    try:
+        _current, still_marked = wikitext.read_english(page)
+    except wikitext.Unparseable:
+        still_marked = False
+    clearing = request.form.get('action') == 'clear-next'
+
     updated = page
     try:
         updated = wikitext.write_english(
             page, request.form.get('english', ''),
-            mark_auto_translated=request.form.get('reviewed') != 'on')
+            mark_auto_translated=still_marked and not clearing)
         updated = wikitext.write_categories(
             updated, request.form.get('categories', '').splitlines())
     except wikitext.Unparseable as e:
@@ -781,14 +895,87 @@ def save_file(title):
         try:
             wikiauth.edit_description(
                 tuple(token), title, updated,
+                'Checked against the Bengali; cleared the auto-translated marker'
+                if clearing else
                 'Reviewed the auto-translated description via the PID control panel')
-            changed.append('description and categories')
+            changed.append('marker cleared' if clearing
+                           else 'description and categories')
         except Exception as e:
             flash('Commons refused the edit: %s' % e)
 
     flash('Saved %s.' % ' and '.join(changed) if changed else 'Nothing to save.')
 
     # Land on the next file, so reviewing a queue is one continuous pass.
+    onward_title = title
+    if request.form.get('action') in ('save-next', 'clear-next'):
+        onward_title = request.form.get('next_title') or title
+    return redirect(url_for('file_detail', title=onward_title, **onward))
+
+
+@app.get('/categories/suggest')
+def suggest_categories():
+    """Commons categories matching what someone is typing.
+
+    Server-side so the browser never talks to the Commons API directly, and so
+    the suggestions share the same two-minute cache as everything else here.
+    """
+    return render_template(
+        '_catsuggest.html',
+        names=commons.suggest_categories(request.args.get('q', ''),
+                                         commons._bucket()))
+
+
+@app.post('/file/<path:title>/tag')
+def tag_file(title):
+    """Flag one file as a possible copyright problem.
+
+    The mild reasons only add a review category; the severe ones write the
+    maintenance templates Commons administrators act on, which is why the
+    heaviest of them will not go through without the filename typed out.
+    """
+    if not title.startswith('File:'):
+        abort(404)
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.form.get('queue', 'review'),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', '')}
+    back = redirect(url_for('file_detail', title=title, **onward))
+
+    reason = request.form.get('reason', '')
+    note = request.form.get('note', '')
+
+    if reason == wikitext.NEEDS_CONFIRMATION:
+        typed = request.form.get('confirm', '').strip()
+        if typed != title[len('File:'):]:
+            flash('Type the filename exactly to confirm a copyright violation. '
+                  'Nothing was changed.')
+            return back
+
+    page = wikiauth.fetch_wikitext(title)
+    if page is None:
+        flash("Couldn't read that page from Commons; nothing was changed.")
+        return back
+
+    try:
+        updated = wikitext.tag_copyright(page, reason, note)
+    except wikitext.Unparseable as e:
+        flash('Not flagged: %s' % e)
+        return back
+
+    try:
+        wikiauth.edit_description(tuple(token), title, updated,
+                                  wikitext.flag_summary(reason, note))
+    except Exception as e:
+        flash('Commons refused the edit: %s' % e)
+        return back
+
+    flash('Flagged: %s.' % wikitext.REASONS[reason][0])
+
+    # Flagging is a verdict, so move on the way saving does.
     return redirect(url_for('file_detail',
                             title=request.form.get('next_title') or title,
                             **onward))
@@ -851,7 +1038,7 @@ def partial_wayback():
 
 
 @app.post('/wayback/retry')
-@requires_token
+@requires_maintainer
 def wayback_retry():
     """Confirm pending archives in the background.
 
@@ -865,6 +1052,32 @@ def wayback_retry():
     return redirect(url_for('index'))
 
 
+def secret_source(configured, *env_names):
+    """Where a working secret came from: 'envvars', 'file' or 'missing'.
+
+    Names only, never values: this endpoint is public, and so is the bot log the
+    panel serves beside it. A half-set pair of envvars reads as 'file', because
+    that is the one the loader will actually have fallen back to.
+    """
+    if not configured:
+        return 'missing'
+    return ('envvars' if all(os.environ.get(n, '').strip() for n in env_names)
+            else 'file')
+
+
 @app.get('/healthz')
 def healthz():
-    return {'ok': True}
+    """Liveness, plus where each secret is coming from.
+
+    After `toolforge envvars create`, this is how you confirm the webservice
+    picked the values up rather than falling back to a stale key file on NFS.
+    """
+    return {
+        'ok': True,
+        'oauth': secret_source(wikiauth.consumer(),
+                               'OAUTH_CONSUMER_KEY', 'OAUTH_CONSUMER_SECRET'),
+        'secret_key': secret_source(_key_material, 'SECRET_KEY'),
+        'owner_set': bool(owner()),
+        'maintainers': len(maintainers()),
+        'tool_data_dir': bool(config.TOOL_DATA_DIR),
+    }

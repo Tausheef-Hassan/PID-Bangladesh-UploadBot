@@ -11,7 +11,7 @@
       <code>#</code> are ignored.
     </p>
 
-    {% if signed_in %}
+    {% if is_maintainer %}
       <form method="post" class="editor">
         <label for="text" class="stat-l">Replacement rules</label>
         <textarea id="text" name="text" spellcheck="false" rows="18">{{ text }}</textarea>
@@ -22,8 +22,10 @@
     {% else %}
       <div class="readout"><pre class="logtext">{% if text %}{{ text }}{% else %}No replacements defined yet.{% endif %}</pre></div>
       <p class="hint" style="margin-top:1rem">
-        {% if controls_enabled %}Sign in to edit these.
-        {% else %}Editing is off until a secret is set in <code>panel.key</code>.{% endif %}
+        {% if not controls_enabled %}Editing is off until
+        <code>PANEL_OWNER</code> is set on the server.
+        {% elif not wiki_user %}Sign in with your Wikimedia account to edit these.
+        {% else %}{{ wiki_user }} is not a maintainer of this tool.{% endif %}
       </p>
     {% endif %}
   </section>

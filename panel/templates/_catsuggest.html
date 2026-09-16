@@ -1,0 +1,7 @@
+{# Suggestions for the category box. Everything listed exists on Commons, which
+   is the whole point: it is how a typo stops becoming a red-linked category. #}
+{% for name in names %}
+  <button type="button" class="catsuggest" data-name="{{ name }}">{{ name }}</button>
+{% else %}
+  <p class="hint catsuggest-empty">No category by that name on Commons.</p>
+{% endfor %}

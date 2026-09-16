@@ -15,7 +15,7 @@
       {% elif next_in %}— next in {{ next_in }}{% endif %}
     </span>
 
-    {% if signed_in %}
+    {% if is_maintainer %}
       <span class="controls">
         <form method="post" action="{{ url_for('run_now') }}">
           <button type="submit">Run now</button>
@@ -36,7 +36,13 @@
       </span>
     {% else %}
       <span class="controls">
-        <a class="route" href="{{ url_for('sign_in_page') }}">Sign in to run the job</a>
+        {% if not controls_enabled %}
+          <span class="hint">Controls are off: no maintainers configured.</span>
+        {% elif not wiki_user %}
+          <a class="route" href="{{ url_for('oauth_start') }}">Sign in to run the job</a>
+        {% else %}
+          <span class="hint">{{ wiki_user }} is not a maintainer of this tool.</span>
+        {% endif %}
       </span>
     {% endif %}
   </div>
