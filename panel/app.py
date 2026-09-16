@@ -632,7 +632,7 @@ def upload_detail(unique_id):
     if not record:
         abort(404, 'No upload recorded with that id.')
     # htmx asks for the fragment; a plain click (or no JS) gets a whole page.
-    page = wikiauth.fetch_wikitext(f"File:{record['filename']}")
+    page, revision = wikiauth.fetch_wikitext(f"File:{record['filename']}")
     english, auto_translated, categories, parse_error = '', True, [], ''
     if page is None:
         parse_error = "Couldn't read the page from Commons."
@@ -692,7 +692,7 @@ def save_description(unique_id):
         abort(403, 'Sign in to Commons first.')
 
     title = f"File:{record['filename']}"
-    page = wikiauth.fetch_wikitext(title)
+    page, revision = wikiauth.fetch_wikitext(title)
     if page is None:
         flash("Couldn't read that page from Commons; nothing was changed.")
         return redirect(url_for('upload_detail', unique_id=unique_id))
@@ -715,7 +715,8 @@ def save_description(unique_id):
     try:
         wikiauth.edit_description(
             token, title, updated,
-            'Reviewed the auto-translated description via the PID control panel')
+            'Reviewed the auto-translated description via the PID control panel',
+            basetimestamp=request.form.get('base_revision'))
     except Exception as e:
         flash(f'Commons refused the edit: {e}')
         return redirect(url_for('upload_detail', unique_id=unique_id))
@@ -795,6 +796,70 @@ def uploads():
         thumb=commons.thumb_url)
 
 
+# One page of the queue. Anything larger risks the gunicorn timeout, because
+# each file is its own Commons edit and there is no batch API for categories.
+# ponytail: if this ever needs to run over a whole month, it becomes a job
+# rather than a request.
+BULK_LIMIT = 48
+
+
+@app.post('/uploads/categorise')
+def bulk_categorise():
+    """Add the same categories to several files at once.
+
+    The uncategorised queue is thousands of files, and PID uploads from one day
+    are usually one event with one set of categories. Doing them individually is
+    the difference between an afternoon and a month.
+    """
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.args.get('queue') or request.form.get('queue', 'uncategorised'),
+              'year': request.form.get('year', ''),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', '')}
+
+    titles = request.form.getlist('titles')[:BULK_LIMIT]
+    # Newlines only: category names contain commas ("Dhaka, Bangladesh").
+    wanted = [c.strip() for c in request.form.get('categories', '').splitlines()
+              if c.strip()]
+
+    if not titles or not wanted:
+        flash('Pick at least one file and one category.')
+        return redirect(url_for('uploads', **onward))
+
+    done, failed = [], []
+    for title in titles:
+        page, revision = wikiauth.fetch_wikitext(title)
+        if page is None:
+            failed.append((title, 'could not be read'))
+            continue
+        try:
+            existing = wikitext.read_categories(page)
+            merged = existing + [c for c in wanted if c not in existing]
+            if merged == existing:
+                continue                      # already had every one of them
+            updated = wikitext.write_categories(page, merged)
+            wikiauth.edit_description(
+                token, title, updated,
+                'Added %s via the PID control panel' % ', '.join(wanted),
+                basetimestamp=revision)
+            done.append(title)
+        except Exception as e:
+            failed.append((title, str(e)))
+
+    said = '%d file%s' % (len(done), '' if len(done) == 1 else 's')
+    if failed:
+        flash('Added %s to %s. %d failed: %s' % (
+            ', '.join(wanted), said, len(failed),
+            '; '.join('%s (%s)' % (t[len('File:'):], why) for t, why in failed[:3])))
+    else:
+        flash('Added %s to %s.' % (', '.join(wanted), said))
+    return redirect(url_for('uploads', **onward))
+
+
 @app.get('/file/<path:title>')
 def file_detail(title):
     """One file's editor, with prev/next that walk the queue it came from.
@@ -814,7 +879,7 @@ def file_detail(title):
         queue, month, offset, cursor)
     position = titles.index(title) if title in titles else None
 
-    page = wikiauth.fetch_wikitext(title)
+    page, revision = wikiauth.fetch_wikitext(title)
     english, auto_translated, categories, bengali = '', True, [], ''
     parse_error, source_url, existing_tag = '', '', ''
     if page is None:
@@ -853,7 +918,8 @@ def file_detail(title):
         'file.html', title=title, filename=title[len('File:'):],
         english=english, auto_translated=auto_translated, bengali=bengali,
         categories="\n".join(categories), editable_categories=editable,
-        locked_categories=locked, parse_error=parse_error,
+        locked_categories=locked, base_revision=revision or '',
+        parse_error=parse_error,
         source_url=source_url, caption=commons.caption(title, bucket),
         prev_title=titles[position - 1] if position else None,
         next_title=(titles[position + 1]
@@ -879,7 +945,7 @@ def save_file(title):
               'offset': request.form.get('offset', 0),
               'cursor': request.form.get('cursor', '')}
 
-    page = wikiauth.fetch_wikitext(title)
+    page, _revision = wikiauth.fetch_wikitext(title)
     if page is None:
         flash("Couldn't read that page from Commons; nothing was changed.")
         return redirect(url_for('file_detail', title=title, **onward))
@@ -922,7 +988,8 @@ def save_file(title):
                 token, title, updated,
                 'Checked against the Bengali; cleared the auto-translated marker'
                 if clearing else
-                'Reviewed the auto-translated description via the PID control panel')
+                'Reviewed the auto-translated description via the PID control panel',
+                basetimestamp=request.form.get('base_revision'))
             changed.append('marker cleared' if clearing
                            else 'description and categories')
         except Exception as e:
@@ -996,7 +1063,7 @@ def tag_file(title):
                   'Nothing was changed.')
             return back
 
-    page = wikiauth.fetch_wikitext(title)
+    page, revision = wikiauth.fetch_wikitext(title)
     if page is None:
         flash("Couldn't read that page from Commons; nothing was changed.")
         return back
@@ -1009,7 +1076,8 @@ def tag_file(title):
 
     try:
         wikiauth.edit_description(token, title, updated,
-                                  wikitext.flag_summary(reason, note))
+                                  wikitext.flag_summary(reason, note),
+                                  basetimestamp=request.form.get('base_revision'))
     except Exception as e:
         flash('Commons refused the edit: %s' % e)
         return back

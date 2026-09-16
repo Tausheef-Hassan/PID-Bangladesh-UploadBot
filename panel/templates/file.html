@@ -64,6 +64,9 @@
           <input type="hidden" name="month" value="{{ month }}">
           <input type="hidden" name="offset" value="{{ offset }}">
           <input type="hidden" name="cursor" value="{{ cursor }}">
+          {# The revision this form was built from. Commons refuses the write if
+             anyone has edited since, rather than quietly reverting them. #}
+          <input type="hidden" name="base_revision" value="{{ base_revision }}">
 
           <label for="caption" class="stat-l">Caption — one short line, shown under the image</label>
           <input id="caption" name="caption" value="{{ caption }}"
@@ -138,6 +141,7 @@
               <input type="hidden" name="month" value="{{ month }}">
               <input type="hidden" name="offset" value="{{ offset }}">
               <input type="hidden" name="cursor" value="{{ cursor }}">
+              <input type="hidden" name="base_revision" value="{{ base_revision }}">
               <input type="hidden" name="next_title" value="{{ next_title or '' }}">
 
               <label for="reason" class="stat-l">What is wrong with it</label>

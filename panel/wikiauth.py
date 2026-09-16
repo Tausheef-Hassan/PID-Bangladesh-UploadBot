@@ -190,21 +190,35 @@ def _csrf(token):
     return csrf
 
 
-def edit_description(token, title, text, summary):
+def edit_description(token, title, text, summary, basetimestamp=None):
     """Replace a file page's wikitext as the signed-in user.
+
+    `basetimestamp` is the revision the editor was looking at. Commons compares
+    it and refuses the write if anyone has edited since, which is the whole
+    protection: this panel sends the entire page, so an unguarded write silently
+    reverts whatever the other person did.
 
     Raises RuntimeError with the API's own message on failure, so the panel can
     show what Commons actually objected to rather than a generic error.
     """
+    data = {'action': 'edit', 'format': 'json',
+            'title': title, 'text': text,
+            'summary': summary,
+            # Not a bot edit: a person decided this.
+            'bot': '0', 'minor': '0',
+            'token': _csrf(token)}
+    if basetimestamp:
+        data['basetimestamp'] = basetimestamp
+        data['starttimestamp'] = basetimestamp
+
     result = session.post(COMMONS_API, headers=_headers(token), timeout=30,
-                          data={'action': 'edit', 'format': 'json',
-                                'title': title, 'text': text,
-                                'summary': summary,
-                                # Not a bot edit: a person decided this.
-                                'bot': '0', 'minor': '0',
-                                'token': _csrf(token)}).json()
+                          data=data).json()
 
     if 'error' in result:
+        if result['error'].get('code') == 'editconflict':
+            raise RuntimeError(
+                'Someone edited this page after you opened it, so nothing was '
+                'saved. Reload to see their version, then redo your change.')
         raise RuntimeError(result['error'].get('info', str(result['error'])))
     if result.get('edit', {}).get('result') != 'Success':
         raise RuntimeError(f"Commons declined the edit: {result}")
@@ -212,16 +226,24 @@ def edit_description(token, title, text, summary):
 
 
 def fetch_wikitext(title):
-    """Current wikitext of a page, or None. Read-only, so no auth needed."""
+    """Returns (wikitext, revision_timestamp), or (None, None).
+
+    The timestamp is what makes a safe edit possible: hand it back as
+    `basetimestamp` and Commons refuses the write if anyone has touched the page
+    since. Read-only, so no auth needed.
+    """
     try:
         r = session.get(COMMONS_API, timeout=20,
                         headers={'User-Agent': USER_AGENT},
-                        params={'action': 'parse', 'page': title,
-                                'prop': 'wikitext', 'formatversion': 2,
+                        params={'action': 'query', 'titles': title,
+                                'prop': 'revisions',
+                                'rvprop': 'content|timestamp',
+                                'rvslots': 'main', 'formatversion': 2,
                                 'format': 'json'})
-        return r.json()['parse']['wikitext']
+        revision = r.json()['query']['pages'][0]['revisions'][0]
+        return revision['slots']['main']['content'], revision['timestamp']
     except Exception:
-        return None
+        return None, None
 
 
 def set_caption(token, page_id, text, lang='en'):

@@ -341,7 +341,13 @@ def test_history_is_capped():
 # ── 5. Panel controls ─────────────────────────────────────────────────────────
 
 def _panel_client(tmp, owner=None, granted=(), signed_in_as=None):
-    """A test client, optionally with an owner, grants and a signed-in account."""
+    """A test client, optionally with an owner, grants and a signed-in account.
+
+    wikiauth is reloaded first: the workbench fakes replace its functions on the
+    module itself and there is no teardown here, so without this a later test
+    quietly runs against another test's stub and passes for the wrong reason.
+    """
+    importlib.reload(panel_app.wikiauth)
     config.SECRET_KEY_PATH = os.path.join(tmp, "secret.key")
     config.RUN_STATE_PATH = os.path.join(tmp, "run_state.json")
     config.MAINTAINERS_PATH = os.path.join(tmp, "maintainers.json")
@@ -748,9 +754,10 @@ def _workbench(tmp):
     """A signed-in panel client whose Commons calls are recorded, not made."""
     client = _panel_client(tmp, owner="RIFAT712", signed_in_as="RIFAT712")
     edits = []
-    panel_app.wikiauth.fetch_wikitext = lambda title: MARKED_PAGE
+    panel_app.wikiauth.fetch_wikitext = lambda title: (MARKED_PAGE, "2026-09-17T10:00:00Z")
     panel_app.wikiauth.edit_description = (
-        lambda token, title, text, summary: edits.append((title, text, summary)))
+        lambda token, title, text, summary, basetimestamp=None:
+            edits.append((title, text, summary, basetimestamp)))
     panel_app._queue_titles = lambda *a, **k: (("File:A.jpg", "File:B.jpg"), None, "", 2)
     with client.session_transaction() as s:
         s["wiki_user"] = "tester"
@@ -944,6 +951,101 @@ def test_the_bengali_is_readable_even_when_the_english_is_not():
 
     assert wikitext.read_bengali("no templates here") == "", "absent Bengali is not an error"
     assert wikitext.read_bengali(None) == ""
+
+
+
+def test_a_save_is_checked_against_the_revision_it_was_built_from():
+    """The panel writes the whole page back, so an unguarded save silently
+    reverts whoever edited in between."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client, edits = _workbench(tmp)
+        client.post("/file/File:A.jpg",
+                    data={"english": "Rewritten.", "categories": "", "caption": "",
+                          "action": "save", "base_revision": "2026-09-17T09:00:00Z"})
+        assert edits, "nothing was saved"
+        assert edits[-1][3] == "2026-09-17T09:00:00Z",             f"basetimestamp not sent: {edits[-1][3]!r}"
+
+
+def test_an_edit_conflict_is_explained_rather_than_forced():
+    from panel import wikiauth
+    importlib.reload(wikiauth)   # the workbench fakes leak; test the real thing
+
+    class Reply:
+        status_code = 200
+
+        def json(self):
+            return {"error": {"code": "editconflict", "info": "Edit conflict."}}
+
+    class Stub:
+        def get(self, *a, **kw):
+            return type("R", (), {
+                "status_code": 200,
+                "json": lambda self: {"query": {"tokens": {"csrftoken": "abc"}}}})()
+
+        def post(self, *a, **kw):
+            return Reply()
+
+    real, wikiauth.session = wikiauth.session, Stub()
+    try:
+        wikiauth.edit_description({"access_token": "t", "expires_at": 9e9},
+                                  "File:A.jpg", "text", "summary",
+                                  basetimestamp="2026-09-17T09:00:00Z")
+        raise AssertionError("an edit conflict was reported as success")
+    except RuntimeError as e:
+        assert "edited this page after you opened it" in str(e), str(e)
+    finally:
+        wikiauth.session = real
+
+
+
+def test_bulk_categorise_adds_to_each_file_and_keeps_going_after_a_failure():
+    """One bad file in a batch of 48 must not cost the other 47."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client, edits = _workbench(tmp)
+
+        def flaky(title):
+            if title == "File:Bad.jpg":
+                return None, None
+            return MARKED_PAGE, "2026-09-17T10:00:00Z"
+
+        panel_app.wikiauth.fetch_wikitext = flaky
+        reply = client.post("/uploads/categorise", data={
+            "titles": ["File:A.jpg", "File:Bad.jpg", "File:C.jpg"],
+            "categories": "Meetings in Dhaka" + chr(10) + "Zubaida Rahman"})
+
+        assert reply.status_code == 302
+        saved = [e[0] for e in edits]
+        assert saved == ["File:A.jpg", "File:C.jpg"], saved
+        for _title, text, summary, base in edits:
+            assert "[[Category:Meetings in Dhaka]]" in text, text[-200:]
+            assert "[[Category:Zubaida Rahman]]" in text
+            assert "Meetings in Dhaka" in summary, summary
+            assert base == "2026-09-17T10:00:00Z", "bulk writes must be guarded too"
+
+
+def test_bulk_categorise_refuses_the_ways_it_could_do_nothing_useful():
+    with tempfile.TemporaryDirectory() as tmp:
+        client, edits = _workbench(tmp)
+
+        client.post("/uploads/categorise",
+                    data={"titles": ["File:A.jpg"], "categories": "   "})
+        client.post("/uploads/categorise", data={"categories": "Meetings in Dhaka"})
+        assert edits == [], "wrote something with no categories or no files"
+
+        # Already has it: adding again should be a no-op, not a null edit.
+        panel_app.wikiauth.fetch_wikitext = lambda t: (
+            MARKED_PAGE + "[[Category:Meetings in Dhaka]]" + chr(10),
+            "2026-09-17T10:00:00Z")
+        client.post("/uploads/categorise", data={"titles": ["File:A.jpg"],
+                                                 "categories": "Meetings in Dhaka"})
+        assert edits == [], "re-saved a file that already had the category"
+
+
+def test_bulk_categorise_needs_a_commons_sign_in():
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, owner="RIFAT712")
+        assert client.post("/uploads/categorise", data={
+            "titles": ["File:A.jpg"], "categories": "X"}).status_code == 403
 
 
 if __name__ == "__main__":

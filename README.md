@@ -441,6 +441,34 @@ Values are `envvars`, `file` or `missing` — names only, never key material. If
 this says `file` after running `toolforge envvars create`, the webservice has
 not been restarted, or a stale key file is shadowing the envvar.
 
+### Categorising in bulk
+
+The uncategorised queue is thousands of files, and a day of PID uploads is
+usually one event with one set of categories. Doing them one at a time is the
+difference between an afternoon and a month, so the queue page has checkboxes,
+a **Select all on this page**, and a box that applies the same categories to
+everything picked. Suggestions come from Commons as you type, on the line you
+are typing rather than the whole box.
+
+A confirmation names the categories and the file count before anything is
+written. Files that already have the category are skipped rather than saved
+again, and one file failing does not abandon the rest — the summary says how
+many went through and names the ones that did not.
+
+Capped at one page (48 files). Each file is its own Commons edit, there being no
+batch API for categories, so a larger selection risks the gunicorn timeout. If
+this ever needs to run over a whole month it should become a job rather than a
+request.
+
+### Not clobbering other people
+
+Every write here replaces the whole page, so an unguarded save silently reverts
+anyone who edited in between — which matters now that more than one person can
+have access. Each read returns the revision it read, the form carries it, and
+the write sends it as `basetimestamp`. Commons then refuses the edit rather than
+performing it, and the panel says so in words: *someone edited this page after
+you opened it, so nothing was saved*.
+
 ### Flagging copyright problems
 
 `{{PD-BDGov-PID}}` covers Bangladesh government works. The backlog also contains

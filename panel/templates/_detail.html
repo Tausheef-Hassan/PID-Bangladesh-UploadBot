@@ -43,6 +43,7 @@
 {% else %}
   <form method="post" action="{{ url_for('save_description', unique_id=record.unique_id) }}"
         class="editor">
+    <input type="hidden" name="base_revision" value="{{ base_revision }}">
     <label for="english" class="stat-l">English description</label>
     <textarea id="english" name="english" rows="6">{{ english }}</textarea>
 

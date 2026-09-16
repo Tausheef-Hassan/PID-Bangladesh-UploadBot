@@ -38,17 +38,108 @@
   {% if not titles %}
     <p class="prose">Nothing here. Either the queue is clear or Commons is unreachable.</p>
   {% else %}
-    <div class="grid">
-      {% for t in titles %}
-        <figure class="shot">
-          <a href="{{ url_for('file_detail', title=t, queue=queue, month=month,
-                              offset=offset, cursor=cursor if cursor is defined else '') }}">
-            <img src="{{ thumb(t[5:], 320) }}" alt="{{ t[5:] }}" loading="lazy">
-          </a>
-          <figcaption title="{{ t[5:] }}">{{ t[5:].rsplit('.', 1)[0] }}</figcaption>
-        </figure>
-      {% endfor %}
-    </div>
+    <form method="post" action="{{ url_for('bulk_categorise') }}" id="bulk">
+      <input type="hidden" name="queue" value="{{ queue }}">
+      <input type="hidden" name="year" value="{{ year }}">
+      <input type="hidden" name="month" value="{{ month }}">
+      <input type="hidden" name="offset" value="{{ offset }}">
+      <input type="hidden" name="cursor" value="{{ cursor if cursor is defined else '' }}">
+
+      <div class="grid">
+        {% for t in titles %}
+          <figure class="shot">
+            {% if wiki_user %}
+              <label class="pick" title="Select for bulk categorising">
+                <input type="checkbox" name="titles" value="{{ t }}">
+              </label>
+            {% endif %}
+            <a href="{{ url_for('file_detail', title=t, queue=queue, month=month,
+                                offset=offset, cursor=cursor if cursor is defined else '') }}">
+              <img src="{{ thumb(t[5:], 320) }}" alt="{{ t[5:] }}" loading="lazy">
+            </a>
+            <figcaption title="{{ t[5:] }}">{{ t[5:].rsplit('.', 1)[0] }}</figcaption>
+          </figure>
+        {% endfor %}
+      </div>
+
+      {% if wiki_user %}
+        {# Hidden until something is picked: an empty toolbar is just furniture. #}
+        <div class="bulkbar" id="bulkbar" hidden>
+          <span class="bulkcount" id="bulkcount">0 selected</span>
+          <button type="button" class="quiet small" id="pickall">Select all on this page</button>
+
+          <span class="suggestbox bulkfield">
+            {# Suggestions are for the line being typed, not the whole box: with
+               two categories in it, sending everything matches nothing. #}
+            <textarea name="categories" id="bulkcats" rows="2"
+                      placeholder="Categories to add, one per line"
+                      hx-get="{{ url_for('suggest_categories') }}"
+                      hx-trigger="keyup changed delay:250ms"
+                      hx-target="#suggest" hx-swap="innerHTML"
+                      hx-vals="js:{q: document.getElementById('bulkcats').value.split('\n').pop().trim()}"></textarea>
+            <div id="suggest" class="suggest-list"></div>
+          </span>
+
+          <button type="submit" id="bulkgo">Add to selected</button>
+        </div>
+      {% endif %}
+    </form>
+
+    <script>
+      // Bulk categorising: the uncategorised queue is thousands of files and a
+      // day's uploads are usually one event, so the same categories apply to
+      // the whole page of them.
+      (function () {
+        var form = document.getElementById('bulk');
+        if (!form) return;
+        var bar = document.getElementById('bulkbar');
+        var count = document.getElementById('bulkcount');
+        var cats = document.getElementById('bulkcats');
+        var list = document.getElementById('suggest');
+        var boxes = form.querySelectorAll('input[name="titles"]');
+
+        function refresh() {
+          var n = form.querySelectorAll('input[name="titles"]:checked').length;
+          bar.hidden = n === 0;
+          count.textContent = n + ' selected';
+        }
+
+        boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+
+        document.getElementById('pickall').addEventListener('click', function () {
+          var turningOn = form.querySelectorAll('input[name="titles"]:checked').length < boxes.length;
+          boxes.forEach(function (b) { b.checked = turningOn; });
+          refresh();
+        });
+
+        list.addEventListener('click', function (e) {
+          if (!e.target.classList.contains('suggest')) return;
+          // Replace the partial line that produced these suggestions, rather
+          // than leaving the fragment behind as a category of its own.
+          var lines = cats.value.split('\n');
+          lines.pop();
+          lines.push(e.target.dataset.name);
+          cats.value = lines.map(function (l) { return l.trim(); })
+                            .filter(Boolean).join('\n') + '\n';
+          list.innerHTML = '';
+          cats.focus();
+        });
+
+        // Saying how many files and which categories, before anything is written.
+        form.addEventListener('submit', function (e) {
+          var n = form.querySelectorAll('input[name="titles"]:checked').length;
+          var named = cats.value.split('\n').map(function (l) { return l.trim(); })
+                          .filter(Boolean);
+          if (!n || !named.length) { e.preventDefault(); return; }
+          if (!confirm('Add ' + named.join(', ') + '\nto ' + n +
+                       ' file' + (n === 1 ? '' : 's') + ' on Commons?')) {
+            e.preventDefault();
+          }
+        });
+
+        refresh();
+      })();
+    </script>
 
     <div class="pager">
       {% if offset %}
