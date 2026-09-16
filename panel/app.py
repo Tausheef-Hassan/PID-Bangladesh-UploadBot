@@ -254,32 +254,46 @@ def nav_state():
 # than that, so the maintainer allowlist above decides who may, and the same
 # session answers both questions.
 
+def _redirect_uri():
+    """Must match the callback on the consumer registration, character for
+    character — MediaWiki compares them exactly."""
+    return url_for('oauth_callback', _external=True)
+
+
 @app.get('/oauth/start')
 def oauth_start():
     try:
-        redirect_url, request_token = wikiauth.start()
+        authorize_url, state = wikiauth.start(_redirect_uri())
     except Exception as e:
         flash(str(e))
         return redirect(url_for('index'))
-    session['wiki_request_token'] = request_token
-    return redirect(redirect_url)
+    session['oauth_state'] = state
+    return redirect(authorize_url)
 
 
 @app.get('/oauth/callback')
 def oauth_callback():
-    request_token = session.pop('wiki_request_token', None)
-    if not request_token:
+    # 2.0 has no request token, so `state` is the only thing tying this call
+    # back to a sign-in we started. Without the check, anyone could hand a
+    # signed-in user a link that logs them into someone else's account.
+    expected = session.pop('oauth_state', None)
+    if not expected or request.args.get('state') != expected:
         flash('That sign-in attempt expired. Try again.')
         return redirect(url_for('index'))
-    try:
-        access_token, username = wikiauth.finish(
-            tuple(request_token), request.query_string.decode())
-    except Exception as e:
-        app.logger.warning('OAuth handshake failed: %r', e)
-        flash('Wikimedia sign-in failed. Try again.')
+
+    if request.args.get('error'):
+        flash('Wikimedia declined the sign-in: %s' % request.args['error'])
         return redirect(url_for('index'))
 
-    session['wiki_token'] = access_token
+    try:
+        token, username = wikiauth.finish(
+            request.args.get('code', ''), _redirect_uri())
+    except Exception as e:
+        app.logger.warning('OAuth handshake failed: %r', e)
+        flash('Wikimedia sign-in failed: %s' % e)
+        return redirect(url_for('index'))
+
+    session['wiki_token'] = token
     session['wiki_user'] = username
     flash(f'Signed in to Commons as {username}.')
     return redirect(request.args.get('next') or url_for('uploads'))
@@ -700,7 +714,7 @@ def save_description(unique_id):
 
     try:
         wikiauth.edit_description(
-            tuple(token), title, updated,
+            token, title, updated,
             'Reviewed the auto-translated description via the PID control panel')
     except Exception as e:
         flash(f'Commons refused the edit: {e}')
@@ -865,7 +879,7 @@ def save_file(title):
     if new_caption and new_caption != commons.caption(title, bucket):
         try:
             wikiauth.set_caption(
-                tuple(token), commons.page_id(title, bucket), new_caption)
+                token, commons.page_id(title, bucket), new_caption)
             changed.append('caption')
         except Exception as e:
             flash('Caption not saved: %s' % e)
@@ -893,7 +907,7 @@ def save_file(title):
     if updated != page:
         try:
             wikiauth.edit_description(
-                tuple(token), title, updated,
+                token, title, updated,
                 'Checked against the Bengali; cleared the auto-translated marker'
                 if clearing else
                 'Reviewed the auto-translated description via the PID control panel')
@@ -966,7 +980,7 @@ def tag_file(title):
         return back
 
     try:
-        wikiauth.edit_description(tuple(token), title, updated,
+        wikiauth.edit_description(token, title, updated,
                                   wikitext.flag_summary(reason, note))
     except Exception as e:
         flash('Commons refused the edit: %s' % e)

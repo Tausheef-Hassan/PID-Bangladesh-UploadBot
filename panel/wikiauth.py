@@ -1,19 +1,20 @@
 # wikiauth.py
-# Wikimedia OAuth for the control panel.
+# Wikimedia OAuth 2.0 for the control panel.
 #
 # Description fixes are a person's editorial judgement, so they are attributed
 # to that person. The panel never sees or needs the bot's password: you sign in
-# at meta.wikimedia.org and the panel holds a token that acts as you.
+# at meta.wikimedia.org and the panel holds a bearer token that acts as you.
 #
 # Set up once, as the tool maintainer:
 #   1. https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose
-#      Callback:  https://<tool>.toolforge.org/oauth/callback
-#      Grants:    "Edit existing pages", plus "Edit structured data" for captions
-#      Leave "Allow consumer to specify a callback in requests" unticked — see
-#      start() below for why.
-#   2. Store the approved consumer as envvars, which keeps it off NFS:
-#        toolforge envvars create OAUTH_CONSUMER_KEY     # paste, then Ctrl-D
-#        toolforge envvars create OAUTH_CONSUMER_SECRET
+#      OAuth version:  2.0, "confidential" (this is a web app with a secret)
+#      Callback:       https://<tool>.toolforge.org/oauth/callback
+#      Grants:         "Edit existing pages", plus "Edit structured data" if you
+#                      want captions as well as descriptions
+#   2. Store the Client ID and Client secret as envvars, which keeps them off
+#      NFS entirely:
+#        toolforge envvars create OAUTH_CONSUMER_KEY     # the Client ID
+#        toolforge envvars create OAUTH_CONSUMER_SECRET  # the Client secret
 #      A $TOOL_DATA_DIR/oauth.key file (KEY=VALUE lines, chmod 600) also works
 #      and is the local-development path, but /data/project/<tool> is readable
 #      by every other tool on Toolforge unless its permissions are tightened.
@@ -21,13 +22,19 @@
 # Configured neither way, the panel stays read-only for Commons and says so.
 
 import os
-
-from mwoauth import ConsumerToken, AccessToken, initiate, complete, identify
-from requests_oauthlib import OAuth1
+import secrets
+import time
+from urllib.parse import urlencode
 
 import config
 
-MW_URI = 'https://meta.wikimedia.org/w/index.php'
+# OAuth 2.0 lives under rest.php, not the 1.0a endpoints on index.php. A 1.0a
+# handshake against a 2.0 consumer is what "Wrong OAuth version, E012" means.
+OAUTH2 = 'https://meta.wikimedia.org/w/rest.php/oauth2'
+AUTHORIZE_URL = f'{OAUTH2}/authorize'
+TOKEN_URL = f'{OAUTH2}/access_token'
+PROFILE_URL = f'{OAUTH2}/resource/profile'
+
 COMMONS_API = 'https://commons.wikimedia.org/w/api.php'
 USER_AGENT = 'pid-bot-panel (https://pid-bangladesh-uploadbot2.toolforge.org)'
 
@@ -35,7 +42,7 @@ session = config.http_session(retries=2)
 
 
 def consumer():
-    """The registered OAuth consumer, or None when not configured.
+    """(client_id, client_secret), or None when not configured.
 
     Environment first: `toolforge envvars` keeps the secret out of the tool's
     home directory entirely, which matters because /data/project/<tool> is
@@ -45,7 +52,7 @@ def consumer():
     key = os.environ.get('OAUTH_CONSUMER_KEY')
     secret = os.environ.get('OAUTH_CONSUMER_SECRET')
     if key and secret:
-        return ConsumerToken(key, secret)
+        return key, secret
 
     values = {}
     try:
@@ -59,70 +66,102 @@ def consumer():
 
     key = values.get('OAUTH_CONSUMER_KEY')
     secret = values.get('OAUTH_CONSUMER_SECRET')
-    return ConsumerToken(key, secret) if key and secret else None
+    return (key, secret) if key and secret else None
 
 
-def start():
-    """Begin the handshake. Returns (redirect_url, request_token_tuple).
+def start(redirect_uri):
+    """Begin the handshake. Returns (authorize_url, state).
 
-    The callback is `oob`, not our own URL. A consumer registered without
-    "Allow consumer to specify a callback in requests" refuses anything else —
-    `oauth_callback must be set, and must be set to "oob"` — and MediaWiki then
-    redirects to the callback stored on the registration, which is the one we
-    want anyway. Sending `oob` also works for a consumer that does allow a
-    dynamic callback, so it is the option that works in both cases.
+    `state` is ours to remember and check when the browser comes back: 2.0 has
+    no request token, so this is the only thing tying the callback to the
+    sign-in that started it.
     """
-    token = consumer()
-    if token is None:
+    pair = consumer()
+    if pair is None:
         raise RuntimeError('Wikimedia sign-in is not configured on this tool.')
-    redirect_url, request_token = initiate(MW_URI, token, callback='oob')
-    return redirect_url, tuple(request_token)
+    client_id, _secret = pair
+
+    state = secrets.token_urlsafe(24)
+    query = urlencode({'response_type': 'code',
+                       'client_id': client_id,
+                       'redirect_uri': redirect_uri,
+                       'state': state})
+    return f'{AUTHORIZE_URL}?{query}', state
 
 
-def finish(request_token, response_query_string):
-    """Complete the handshake. Returns (access_token_tuple, username)."""
-    token = consumer()
-    if token is None:
+def finish(code, redirect_uri):
+    """Exchange the code for a token. Returns (token_dict, username)."""
+    pair = consumer()
+    if pair is None:
         raise RuntimeError('Wikimedia sign-in is not configured on this tool.')
-    access = complete(MW_URI, token,
-                      _as_request_token(request_token), response_query_string)
-    who = identify(MW_URI, token, access)
-    return tuple(access), who['username']
+    client_id, client_secret = pair
+
+    payload = session.post(
+        TOKEN_URL, timeout=20, headers={'User-Agent': USER_AGENT},
+        data={'grant_type': 'authorization_code',
+              'code': code,
+              'client_id': client_id,
+              'client_secret': client_secret,
+              'redirect_uri': redirect_uri}).json()
+
+    if 'access_token' not in payload:
+        raise RuntimeError(payload.get('message')
+                           or payload.get('error_description')
+                           or payload.get('error')
+                           or 'Wikimedia did not issue a token.')
+
+    # ponytail: the refresh token is deliberately dropped. Both tokens are long
+    # JWTs and the session is a 4 KB signed cookie, so keeping both risks the
+    # browser silently discarding the whole thing. Four hours covers a review
+    # session; if people start getting signed out mid-pass, move the token to
+    # server-side storage rather than squeezing it into the cookie.
+    token = {'access_token': payload['access_token'],
+             'expires_at': time.time() + int(payload.get('expires_in', 14400))}
+
+    who = session.get(PROFILE_URL, timeout=20, headers=_headers(token)).json()
+    username = who.get('username')
+    if not username:
+        raise RuntimeError('Wikimedia did not say who signed in.')
+    return token, username
 
 
-def _as_request_token(stored):
-    from mwoauth import RequestToken
-    return RequestToken(*stored)
+def expired(token):
+    return not token or time.time() >= token.get('expires_at', 0)
 
 
-def _auth(access_token):
-    token = consumer()
-    return OAuth1(token.key, token.secret, access_token[0], access_token[1])
+def _headers(token):
+    return {'Authorization': 'Bearer ' + token['access_token'],
+            'User-Agent': USER_AGENT}
 
 
-def edit_description(access_token, title, text, summary):
+def _csrf(token):
+    """A CSRF token for the signed-in user, or a clear reason why not."""
+    if expired(token):
+        raise RuntimeError('Your Commons sign-in expired. Sign in again.')
+    data = session.get(COMMONS_API, headers=_headers(token), timeout=20,
+                       params={'action': 'query', 'meta': 'tokens',
+                               'type': 'csrf', 'format': 'json'}).json()
+    csrf = data.get('query', {}).get('tokens', {}).get('csrftoken')
+    # Anonymous gets the literal '+\\', which would then fail confusingly at
+    # the edit itself; catch it here where the cause is still obvious.
+    if not csrf or csrf == '+\\':
+        raise RuntimeError('Commons did not accept that sign-in. Sign in again.')
+    return csrf
+
+
+def edit_description(token, title, text, summary):
     """Replace a file page's wikitext as the signed-in user.
 
     Raises RuntimeError with the API's own message on failure, so the panel can
     show what Commons actually objected to rather than a generic error.
     """
-    auth = _auth(access_token)
-    headers = {'User-Agent': USER_AGENT}
-
-    csrf = session.get(COMMONS_API, auth=auth, headers=headers, timeout=20,
-                       params={'action': 'query', 'meta': 'tokens',
-                               'type': 'csrf', 'format': 'json'}).json()
-    token = csrf.get('query', {}).get('tokens', {}).get('csrftoken')
-    if not token:
-        raise RuntimeError('Commons did not issue an edit token; sign in again.')
-
-    result = session.post(COMMONS_API, auth=auth, headers=headers, timeout=30,
+    result = session.post(COMMONS_API, headers=_headers(token), timeout=30,
                           data={'action': 'edit', 'format': 'json',
                                 'title': title, 'text': text,
                                 'summary': summary,
                                 # Not a bot edit: a person decided this.
                                 'bot': '0', 'minor': '0',
-                                'token': token}).json()
+                                'token': _csrf(token)}).json()
 
     if 'error' in result:
         raise RuntimeError(result['error'].get('info', str(result['error'])))
@@ -144,28 +183,18 @@ def fetch_wikitext(title):
         return None
 
 
-def set_caption(access_token, page_id, text, lang='en'):
+def set_caption(token, page_id, text, lang='en'):
     """Set the structured-data caption (a MediaInfo label) on a file.
 
     Captions are not wikitext: they live on the M<pageid> entity and are set
     through the Wikibase API. Most PID files have none at all.
     """
-    auth = _auth(access_token)
-    headers = {'User-Agent': USER_AGENT}
-
-    csrf = session.get(COMMONS_API, auth=auth, headers=headers, timeout=20,
-                       params={'action': 'query', 'meta': 'tokens',
-                               'type': 'csrf', 'format': 'json'}).json()
-    token = csrf.get('query', {}).get('tokens', {}).get('csrftoken')
-    if not token:
-        raise RuntimeError('Commons did not issue an edit token; sign in again.')
-
-    result = session.post(COMMONS_API, auth=auth, headers=headers, timeout=30,
+    result = session.post(COMMONS_API, headers=_headers(token), timeout=30,
                           data={'action': 'wbsetlabel', 'format': 'json',
                                 'id': f'M{page_id}', 'language': lang,
                                 'value': text.strip(),
                                 'summary': 'Caption set via the PID control panel',
-                                'bot': '0', 'token': token}).json()
+                                'bot': '0', 'token': _csrf(token)}).json()
     if 'error' in result:
         info = result['error'].get('info', str(result['error']))
         if 'permissiondenied' in str(result['error'].get('code', '')):

@@ -358,7 +358,7 @@ def _panel_client(tmp, owner=None, granted=(), signed_in_as=None):
     if signed_in_as:
         with client.session_transaction() as s:
             s["wiki_user"] = signed_in_as
-            s["wiki_token"] = ("a", "b")
+            s["wiki_token"] = {"access_token": "t", "expires_at": 9e9}
     return client
 
 
@@ -740,7 +740,7 @@ def _workbench(tmp):
     panel_app._queue_titles = lambda *a, **k: (("File:A.jpg", "File:B.jpg"), None, "", 2)
     with client.session_transaction() as s:
         s["wiki_user"] = "tester"
-        s["wiki_token"] = ("a", "b")
+        s["wiki_token"] = {"access_token": "t", "expires_at": 9e9}
     return client, edits
 
 
@@ -812,27 +812,39 @@ def test_category_suggestions_come_from_commons_and_stay_quiet_when_short():
 
 
 
-def test_oauth_handshake_asks_for_the_oob_callback():
-    """A consumer registered without "allow consumer to specify a callback"
-    rejects anything but oob, and MediaWiki then uses the callback stored on
-    the registration. Only live MediaWiki says so, hence this check."""
+def test_oauth2_authorize_url_carries_what_mediawiki_needs():
+    """1.0a against a 2.0 consumer is "Wrong OAuth version, E012", so pin the
+    2.0 endpoint and its parameters — only live MediaWiki says otherwise."""
+    from urllib.parse import parse_qs, urlparse
     from panel import wikiauth
-    seen = {}
 
-    def fake_initiate(uri, token, callback='oob', **kw):
-        seen["callback"] = callback
-        return "https://meta.example/authorize", ("req-key", "req-secret")
-
-    real_initiate, real_consumer = wikiauth.initiate, wikiauth.consumer
-    wikiauth.initiate = fake_initiate
-    wikiauth.consumer = lambda: type("T", (), {"key": "k", "secret": "s"})()
+    real = wikiauth.consumer
+    wikiauth.consumer = lambda: ("client-id", "client-secret")
     try:
-        url, token = wikiauth.start()
+        url, state = wikiauth.start("https://tool.example/oauth/callback")
     finally:
-        wikiauth.initiate, wikiauth.consumer = real_initiate, real_consumer
+        wikiauth.consumer = real
 
-    assert seen["callback"] == "oob",         f"sent {seen['callback']!r}; MediaWiki refuses anything but 'oob' here"
-    assert token == ("req-key", "req-secret")
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    assert parsed.path.endswith("/rest.php/oauth2/authorize"), url
+    assert query["response_type"] == ["code"], query
+    assert query["client_id"] == ["client-id"]
+    assert query["redirect_uri"] == ["https://tool.example/oauth/callback"]
+    assert query["state"] == [state] and len(state) > 20, "state must be unguessable"
+
+
+def test_a_callback_with_the_wrong_state_is_refused():
+    """Without this check a crafted link could sign someone into another
+    account. 2.0 has no request token, so state is the only guard."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _panel_client(tmp, owner="RIFAT712")
+        with client.session_transaction() as s:
+            s["oauth_state"] = "the-real-one"
+        reply = client.get("/oauth/callback?code=abc&state=forged")
+        assert reply.status_code == 302
+        with client.session_transaction() as s:
+            assert "wiki_user" not in s, "a forged callback signed someone in"
 
 
 if __name__ == "__main__":

@@ -356,20 +356,23 @@ Edits are attributed to **you**, not the bot, through Wikimedia OAuth. Set it up
 once:
 
 1. Propose a consumer at
-   [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose)
-   with callback `https://<tool>.toolforge.org/oauth/callback` and the grants
-   **Edit existing pages** and **Edit structured data** (the second is only
-   needed for captions; descriptions and copyright flags work without it).
+   [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose):
 
-   Leave **"Allow consumer to specify a callback in requests"** unticked. The
-   panel sends `oauth_callback=oob` and lets MediaWiki redirect to the callback
-   above — a consumer registered without that box refuses anything else, with
-   `oauth_callback must be set, and must be set to "oob"`.
+   | Field | Value |
+   |---|---|
+   | OAuth version | **OAuth 2.0**, client type **confidential** |
+   | Callback | `https://<tool>.toolforge.org/oauth/callback` |
+   | Grants | **Edit existing pages**, plus **Edit structured data** for captions |
+
+   The callback is compared character for character, so it must match the tool
+   URL exactly. The panel speaks 2.0 against `meta.wikimedia.org/w/rest.php/oauth2`;
+   pointing it at a 1.0a consumer fails with `Wrong OAuth version, E012`.
+
 2. Once approved, store the consumer as **envvars**, which keeps it off NFS
    entirely:
    ```bash
-   toolforge envvars create OAUTH_CONSUMER_KEY      # paste the value, then Ctrl-D
-   toolforge envvars create OAUTH_CONSUMER_SECRET
+   toolforge envvars create OAUTH_CONSUMER_KEY      # the Client ID, then Ctrl-D
+   toolforge envvars create OAUTH_CONSUMER_SECRET   # the Client secret
    toolforge webservice buildservice restart
    ```
    Never pass a secret as a command-line argument — it lands in your shell
