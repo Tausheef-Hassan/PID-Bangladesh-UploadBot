@@ -822,26 +822,37 @@ def file_detail(title):
     else:
         source_url = wikitext.read_source_url(page)
         existing_tag = wikitext.read_copyright_tag(page)
+        # Categories are read separately from the description. They are plain
+        # [[Category:…]] links and parse fine on their own, so an unusual
+        # description — common in the 2015-2024 backlog — must not take the
+        # category editor down with it.
+        categories = wikitext.read_categories(page)
         try:
             english, auto_translated = wikitext.read_english(page)
-            categories = wikitext.read_categories(page)
         except wikitext.Unparseable as e:
             parse_error = 'Not in the shape the bot writes (%s), so the description is not editable here.' % e
 
     bucket = commons._bucket()
 
-    # The wikitext only knows the categories written on the page; the date and
-    # PID-BD ones are added by Module:PIDCategoryHelper at render time. Showing
-    # both is what stops someone hand-adding a category the file already has.
+    # Three states, and the difference is whether the category is written on the
+    # page at all. Anything in the wikitext is editable, including what the bot
+    # put there. The date and PID-BD ones come from Module:PIDCategoryHelper at
+    # render time, so no wikitext edit can remove them and saying otherwise
+    # would be a lie. The copyright flag is on the page but has its own control.
+    on_the_page = [name.strip()
+                   for name, _sort in wikitext.CATEGORY_LINE.findall(page or '')]
     editable = [c.strip() for c in categories]
-    from_templates = [c for c in commons.categories_of(title, bucket)
-                      if c not in editable]
+    locked = [(c, 'copyright flag — use the flag control below')
+              for c in on_the_page if wikitext.PROTECTED_CATEGORY.match(c)]
+    locked += [(c, 'added by a template — no wikitext edit can remove it')
+               for c in commons.categories_of(title, bucket)
+               if c not in on_the_page]
 
     return render_template(
         'file.html', title=title, filename=title[len('File:'):],
         english=english, auto_translated=auto_translated,
         categories="\n".join(categories), editable_categories=editable,
-        template_categories=from_templates, parse_error=parse_error,
+        locked_categories=locked, parse_error=parse_error,
         source_url=source_url, caption=commons.caption(title, bucket),
         prev_title=titles[position - 1] if position else None,
         next_title=(titles[position + 1]

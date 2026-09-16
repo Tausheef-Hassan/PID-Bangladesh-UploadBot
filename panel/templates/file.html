@@ -74,8 +74,8 @@
 
           <label for="catinput" class="stat-l">Categories</label>
           <div class="cats" id="cats">
-            {% for name in template_categories %}
-              <span class="cat cat-fixed" title="Added by a template — not editable here">{{ name }}</span>
+            {% for name, why in locked_categories %}
+              <span class="cat cat-fixed" title="{{ why }}">{{ name }}</span>
             {% endfor %}
             {% for name in editable_categories %}
               <span class="cat" data-name="{{ name }}">{{ name }}<button type="button"
@@ -93,7 +93,9 @@
             <div id="suggest" class="suggest-list"></div>
           </div>
           <p class="hint">Suggestions come from Commons, so anything listed
-            already exists. Greyed categories are added by the templates.</p>
+            already exists. Greyed categories are not written on the page — the
+            templates add them — so no edit here can remove them; hover to see
+            why each one is fixed.</p>
 
           <input type="hidden" name="next_title" value="{{ next_title or '' }}">
 

@@ -539,19 +539,33 @@ def test_refuses_braces_and_empty_descriptions():
         raise AssertionError(f"accepted dangerous description: {bad!r}")
 
 
-def test_categories_separate_topic_from_automatic():
-    assert wikitext.read_categories(PAGE) == ["Some topic"], \
-        "template-driven categories must not look hand-editable"
+def test_everything_written_on_the_page_is_editable():
+    """If a category is in the wikitext, a person put it there and a person can
+    take it off — including the one the bot writes at upload time."""
+    assert wikitext.read_categories(PAGE) == ["Uploaded with pypan", "Some topic"], \
+        wikitext.read_categories(PAGE)
 
 
-def test_writing_categories_keeps_the_automatic_ones():
+def test_the_flag_is_the_only_category_the_box_will_not_touch():
+    flagged = wikitext.tag_copyright(PAGE, "not-government")
+    assert wikitext.CONCERNS_CATEGORY not in wikitext.read_categories(flagged), \
+        "a flag must not come off as a side effect of tidying categories"
+
+    kept = wikitext.write_categories(flagged, ["Zubaida Rahman"])
+    assert wikitext.read_copyright_tag(kept), "rewriting categories dropped the flag"
+
+
+def test_writing_categories_replaces_exactly_what_it_was_given():
     updated = wikitext.write_categories(
         PAGE, ["Zubaida Rahman", "  Category:Novo Theatre  ", "", "Zubaida Rahman"])
 
-    assert "[[Category: Uploaded with pypan]]" in updated, "automatic category dropped"
     assert wikitext.read_categories(updated) == ["Zubaida Rahman", "Novo Theatre"], \
         "expected de-duplication and the Category: prefix stripped"
     assert "Some topic" not in updated, "replaced topic category still present"
+    # The panel posts back every chip it showed, so anything missing from the
+    # list was taken off on purpose.
+    assert "Uploaded with pypan" not in updated, \
+        "a category left out of the list must not survive the write"
 
 
 def test_category_names_cannot_smuggle_markup():

@@ -19,13 +19,14 @@ MARKER = '{{Auto-translated PID English description}}'
 # category editor has to know to leave it alone.
 CONCERNS_CATEGORY = 'PID files with copyright concerns'
 
-# Not hand-editable. Date-PID and PD-BDGov-PID call Module:PIDCategoryHelper and
-# file the first four themselves; the last is written by the copyright flag
-# below. Any of them appearing in the topic-category box would invite someone to
-# duplicate — or, worse, silently delete — what the tool put there.
-AUTOMATIC_CATEGORY = re.compile(
-    r'^(Uploaded with pypan|PID-BD images from |Bangladesh photographs taken on |'
-    r'Historic images from PID-BD|' + re.escape(CONCERNS_CATEGORY) + ')', re.I)
+# The one category the box will not touch. A copyright flag is a verdict with
+# its own control, so it must not come off as a side effect of tidying
+# categories — but it is the *only* exception. Everything else written on the
+# page is the editor's to change, including what the bot itself put there.
+#
+# The date and PID-BD categories need no rule: Module:PIDCategoryHelper adds
+# them at render time, so they never appear in the wikitext for this to match.
+PROTECTED_CATEGORY = re.compile('^' + re.escape(CONCERNS_CATEGORY), re.I)
 
 CATEGORY_LINE = re.compile(r'\[\[\s*Category\s*:\s*([^\]|]+?)\s*(\|[^\]]*)?\]\]', re.I)
 
@@ -94,13 +95,17 @@ def write_english(text, english, mark_auto_translated):
 
 
 def read_categories(text):
-    """Topic categories on the page, in order, excluding the automatic ones."""
+    """Editable categories on the page, in order.
+
+    Everything written in the wikitext except the copyright flag — if it is on
+    the page, a person put it there and a person can take it off.
+    """
     return [name for name, _sort in CATEGORY_LINE.findall(text)
-            if not AUTOMATIC_CATEGORY.match(name.strip())]
+            if not PROTECTED_CATEGORY.match(name.strip())]
 
 
 def write_categories(text, categories):
-    """Replace the topic categories, leaving automatic ones untouched.
+    """Replace the editable categories, leaving the copyright flag untouched.
 
     New ones are appended at the end, which is where Commons convention and
     the bot's own template already put them.
@@ -109,7 +114,7 @@ def write_categories(text, categories):
     for raw in categories:
         name = raw.strip().lstrip('[').rstrip(']').strip()
         name = re.sub(r'^\s*Category\s*:\s*', '', name, flags=re.I).strip()
-        if not name or AUTOMATIC_CATEGORY.match(name):
+        if not name or PROTECTED_CATEGORY.match(name):
             continue
         if any(c in name for c in '[]{}|'):
             raise Unparseable(f'category name contains markup: {name!r}')
@@ -118,7 +123,7 @@ def write_categories(text, categories):
 
     # Drop the existing topic categories wherever they sit.
     def drop(match):
-        return '' if not AUTOMATIC_CATEGORY.match(match.group(1).strip()) else match.group(0)
+        return '' if not PROTECTED_CATEGORY.match(match.group(1).strip()) else match.group(0)
 
     stripped = CATEGORY_LINE.sub(drop, text).rstrip()
     if not cleaned:
