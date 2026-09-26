@@ -1,0 +1,360 @@
+{% extends 'base.html' %}
+{% block title %}{{ filename }} — PID upload bot{% endblock %}
+{% block content %}
+
+<section class="card">
+  {# Queue position and the two keys that matter, at the top where your hands are. #}
+  <div class="queuenav">
+    <a class="link small" href="{{ url_for('uploads', queue=queue, month=month, q=q or None,
+                                           offset=offset, cursor=cursor) }}">
+      &larr; {{ queues[queue].label }}</a>
+    {% if position is not none %}
+      <span class="hint">{{ position + 1 }} of {{ page_count }} on this page{% if total %},
+        {{ '{:,}'.format(total) }} in the queue{% endif %}</span>
+    {% endif %}
+    <span class="queuenav-keys">
+      {% if prev_title %}
+        <a class="seg" id="prevlink"
+           href="{{ url_for('file_detail', title=prev_title, queue=queue, month=month, q=q or None,
+                            offset=offset, cursor=cursor) }}">&larr; Previous</a>
+      {% endif %}
+      {% if next_title %}
+        <a class="seg" id="nextlink"
+           href="{{ url_for('file_detail', title=next_title, queue=queue, month=month, q=q or None,
+                            offset=offset, cursor=cursor) }}">Next &rarr;</a>
+      {% endif %}
+    </span>
+  </div>
+
+  <h2 class="filetitle">{{ filename }}</h2>
+  <p class="hint"><a class="link" href="{{ filepage(filename) }}">Open on Commons</a></p>
+
+  {% if bengali %}
+    <div class="cdx-message cdx-message--block cdx-message--notice">
+      <span class="cdx-message__icon"></span>
+      <div class="cdx-message__content">
+        {% if name_matches %}{{ name_matches|length }} name{{ '' if name_matches|length == 1 else 's' }} confirmed on Wikidata.
+        {% else %}No names in this caption were found on Wikidata.{% endif %}
+        Any other names were spelled by Gemini. Select one in the Bengali to fix it.
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="workbench">
+    <div class="compare">
+      {% if source_url %}
+        <figure>
+          <img src="{{ url_for('source_image', url=source_url) }}" alt="Original as published" loading="lazy">
+          <figcaption>1. Downloaded from PID</figcaption>
+        </figure>
+      {% endif %}
+      <figure>
+        <img src="{{ thumb(filename, 800) }}" alt="{{ filename }}" loading="lazy">
+        <figcaption>2. Uploaded to Commons, caption cut off</figcaption>
+      </figure>
+    </div>
+
+    <div class="editpane">
+      {% if parse_error %}
+        <p class="aside compact">{{ parse_error }}</p>
+      {% endif %}
+
+      {# The Bengali and its Wikidata names are shown to everyone, signed in or
+         not: checking a name needs no account. Read-only: it is OCR of the
+         source caption, not something to rewrite while reviewing. #}
+      {% if bengali %}
+        <span class="stat-l">3. Bengali caption, read by OCR</span>
+        <p class="bn-source" lang="bn" id="bnsource">{{ bengali_html }}</p>
+        {% if name_matches %}
+          <ul class="wdlist">
+            {% for bn, en, qid in name_matches %}
+              <li><mark class="wd" lang="bn">{{ bn }}</mark> → <b>{{ en }}</b>
+                <a href="https://www.wikidata.org/wiki/{{ qid }}" target="_blank" rel="noopener">Wikidata</a></li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        <ul class="fixchips" id="fixchips"></ul>
+      {% else %}
+        <p class="hint">No Bengali on this page, so there is nothing to
+          check the translation against here.</p>
+      {% endif %}
+
+      {% if not wiki_configured %}
+        <p class="aside compact">Wikimedia sign-in is not set up on this tool, so
+          this file can only be edited on Commons itself.</p>
+      {% elif not wiki_user %}
+        <p class="hint">
+          <a class="link" href="{{ url_for('oauth_start') }}">Sign in with your Wikimedia account</a>
+          to edit. Changes are saved under your name, not the bot's.
+        </p>
+        <div class="readout"><p>{{ english }}</p></div>
+      {% else %}
+        <form method="post" class="editor" id="fileform"
+              action="{{ url_for('save_file', title=title) }}">
+          <input type="hidden" name="queue" value="{{ queue }}">
+          <input type="hidden" name="month" value="{{ month }}">
+          <input type="hidden" name="offset" value="{{ offset }}">
+          <input type="hidden" name="cursor" value="{{ cursor }}">
+          <input type="hidden" name="q" value="{{ q }}">
+          {# The revision this form was built from. Commons refuses the write if
+             anyone has edited since, rather than quietly reverting them. #}
+          <input type="hidden" name="base_revision" value="{{ base_revision }}">
+
+          <label for="caption" class="stat-l">Caption — one short line, shown under the image</label>
+          <input id="caption" name="caption" value="{{ caption }}"
+                 placeholder="{% if not caption %}No caption set{% endif %}">
+
+          <label for="english" class="stat-l">4. English description on Commons</label>
+          <textarea id="english" name="english" rows="7">{{ english }}</textarea>
+          {% if is_maintainer and bengali %}
+            <label class="check"><input type="checkbox" name="remember_names" checked>
+              Also remember my name fixes for future uploads</label>
+          {% endif %}
+
+          <label for="catinput" class="stat-l">Categories</label>
+          <div class="cats" id="cats">
+            {% for name, why in locked_categories %}
+              <span class="cat cat-fixed" title="{{ why }}">{{ name }}</span>
+            {% endfor %}
+            {% for name in editable_categories %}
+              <span class="cat" data-name="{{ name }}">{{ name }}<button type="button"
+                    class="cat-x" aria-label="Remove {{ name }}">&times;</button></span>
+            {% endfor %}
+          </div>
+          <input type="hidden" name="categories" id="categories" value="{{ categories }}">
+
+          <div class="catadd">
+            <input id="catinput" autocomplete="off" placeholder="Add a category"
+                   hx-get="{{ url_for('suggest_categories') }}"
+                   hx-trigger="keyup changed delay:250ms"
+                   hx-target="#suggest" hx-swap="innerHTML"
+                   hx-params="q" name="q">
+            <div id="suggest" class="suggest-list"></div>
+          </div>
+          <p class="hint">Suggestions come from Commons, so anything listed
+            already exists. Greyed categories are not written on the page — the
+            templates add them — so no edit here can remove them; hover to see
+            why each one is fixed.</p>
+
+          <input type="hidden" name="next_title" value="{{ next_title or '' }}">
+
+          {# The commonest verdict by far is "the translation is fine", so it is
+             the one button you can hit without reading the others. #}
+          <div class="editor-actions">
+            {% if auto_translated %}
+              <button type="submit" name="action" value="clear-next">
+                Description is fine{% if next_title %} — next{% endif %}</button>
+            {% endif %}
+            <button type="submit" name="action" value="save"
+                    class="{% if auto_translated %}quiet{% endif %}">Save</button>
+            {% if next_title %}
+              <button type="submit" name="action" value="save-next"
+                      class="quiet">Save and go to next</button>
+            {% endif %}
+          </div>
+        </form>
+
+        {% if existing_tag %}
+          <p class="flagged">Flagged: {{ existing_tag }}. Resolve it on Commons
+            before flagging it again.</p>
+        {% else %}
+          <section class="flagbox">
+            <h3 class="flagbox-h">Flag a copyright problem</h3>
+            <form method="post" class="editor"
+                  action="{{ url_for('tag_file', title=title) }}">
+              <input type="hidden" name="queue" value="{{ queue }}">
+              <input type="hidden" name="month" value="{{ month }}">
+              <input type="hidden" name="offset" value="{{ offset }}">
+              <input type="hidden" name="cursor" value="{{ cursor }}">
+          <input type="hidden" name="q" value="{{ q }}">
+              <input type="hidden" name="base_revision" value="{{ base_revision }}">
+              <input type="hidden" name="next_title" value="{{ next_title or '' }}">
+
+              <label for="reason" class="stat-l">What is wrong with it</label>
+              <select id="reason" name="reason" required>
+                <option value="" selected disabled>Choose a reason</option>
+                <optgroup label="Add to the review list — nothing else happens">
+                  {% for key, (label, template, needs) in reasons.items() if not template %}
+                    <option value="{{ key }}" data-tier="review">{{ label }}</option>
+                  {% endfor %}
+                </optgroup>
+                <optgroup label="Tag on Commons — maintainers will act on it">
+                  {% for key, (label, template, needs) in reasons.items() if template %}
+                    <option value="{{ key }}" data-tier="commons"
+                            {% if needs %}data-note="1"{% endif %}
+                            {% if key == confirm_reason %}data-confirm="1"{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </optgroup>
+              </select>
+
+              <label for="note" class="stat-l">Why — kept in the edit summary</label>
+              <input id="note" name="note"
+                     placeholder="Agency photograph, credited to AFP on the source page">
+
+              <p id="confirmrow" class="flagconfirm" hidden>
+                This nominates the file for speedy deletion and an administrator
+                may act within hours. Type <code>{{ filename }}</code> to confirm.
+                <input name="confirm" placeholder="Type the filename to confirm"
+                       autocomplete="off" spellcheck="false">
+              </p>
+
+              <div class="editor-actions">
+                <button type="submit" class="danger" id="flagbtn">Flag this file</button>
+              </div>
+            </form>
+          </section>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<div class="fixpop" id="fixpop" hidden role="dialog" aria-label="Fix a name">
+  <b>Fix this name</b>
+  <span lang="bn" id="fixbn"></span>
+  <label>How Gemini spelled it in the English (optional)
+    <input id="fixwrong" autocomplete="off"></label>
+  <label>Correct English
+    <input id="fixright" autocomplete="off"></label>
+  <span style="display:flex;gap:.5rem">
+    <button type="button" class="primary small" id="fixapply">Apply</button>
+    <button type="button" class="quiet small" id="fixcancel">Cancel</button>
+  </span>
+</div>
+
+<script>
+  // Arrow keys walk the queue, unless you are typing into the form.
+  document.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    var link = e.key === 'ArrowLeft' ? document.getElementById('prevlink')
+             : e.key === 'ArrowRight' ? document.getElementById('nextlink') : null;
+    if (link) { e.preventDefault(); window.location = link.href; }
+  });
+
+  // Categories, HotCat-style: chips you can drop, and an add box whose
+  // suggestions all exist on Commons. The hidden field stays the one thing the
+  // form posts, so the save path never learned about any of this.
+  (function () {
+    var box = document.getElementById('cats');
+    var field = document.getElementById('categories');
+    var input = document.getElementById('catinput');
+    var list = document.getElementById('suggest');
+    if (!box || !field) return;
+
+    function sync() {
+      field.value = Array.prototype.map
+        .call(box.querySelectorAll('.cat[data-name]'), function (c) { return c.dataset.name; })
+        .join('\n');
+    }
+
+    function add(name) {
+      name = (name || '').trim();
+      if (!name || field.value.split('\n').indexOf(name) !== -1) return;
+      var chip = document.createElement('span');
+      chip.className = 'cat';
+      chip.dataset.name = name;
+      chip.textContent = name;
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'cat-x';
+      x.setAttribute('aria-label', 'Remove ' + name);
+      x.innerHTML = '&times;';
+      chip.appendChild(x);
+      box.appendChild(chip);
+      sync();
+    }
+
+    box.addEventListener('click', function (e) {
+      if (!e.target.classList.contains('cat-x')) return;
+      e.target.parentNode.remove();
+      sync();
+    });
+
+    list.addEventListener('click', function (e) {
+      if (!e.target.classList.contains('suggest')) return;
+      add(e.target.dataset.name);
+      input.value = '';
+      list.innerHTML = '';
+      input.focus();
+    });
+
+    // Enter adds what is typed rather than submitting the description form —
+    // a stray Return in this box should never save the page.
+    input.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var first = list.querySelector('.suggest');
+      add(first ? first.dataset.name : input.value);
+      input.value = '';
+      list.innerHTML = '';
+    });
+  })();
+
+  // The confirmation field only exists for the one flag an administrator can
+  // act on within hours. Showing it for every reason would teach people to
+  // type past it.
+  var reason = document.getElementById('reason');
+  if (reason) {
+    reason.addEventListener('change', function () {
+      var picked = reason.options[reason.selectedIndex];
+      var confirming = picked.dataset.confirm === '1';
+      var row = document.getElementById('confirmrow');
+      row.hidden = !confirming;
+      row.querySelector('input').required = confirming;
+      document.getElementById('note').required = picked.dataset.note === '1';
+      // The button names the consequence, because it is the last thing read
+      // before the edit goes through.
+      document.getElementById('flagbtn').textContent =
+        picked.dataset.tier === 'commons' ? 'Tag this file on Commons'
+                                          : 'Add to the review list';
+    });
+  }
+
+  // Fix a name: select words in the Bengali, say what the English should be.
+  // The fix edits the English box, and travels with the form as name_fix so the
+  // server can remember it for future runs.
+  (function () {
+    var src = document.getElementById('bnsource'), pop = document.getElementById('fixpop');
+    var form = document.getElementById('fileform');
+    if (!src || !pop || !form) return;
+    var english = document.getElementById('english'), chips = document.getElementById('fixchips');
+    var bn = '';
+    function close() { pop.hidden = true; }
+    function openFromSelection() {
+      var sel = window.getSelection();
+      bn = sel ? sel.toString().trim() : '';
+      // Both ends inside the caption, one line: a drag past it picks up the
+      // name list, which is not a name.
+      if (!bn || /[\r\n]/.test(bn) || !src.contains(sel.anchorNode) || !src.contains(sel.focusNode)) return;
+      var r = sel.getRangeAt(0).getBoundingClientRect();
+      document.getElementById('fixbn').textContent = bn;
+      document.getElementById('fixwrong').value = '';
+      document.getElementById('fixright').value = '';
+      pop.hidden = false;
+      pop.style.top = (window.scrollY + r.bottom + 6) + 'px';
+      pop.style.left = Math.max(8, Math.min(window.scrollX + r.left,
+        window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - 8)) + 'px';
+      document.getElementById('fixright').focus();
+    }
+    src.addEventListener('mouseup', openFromSelection);
+    src.addEventListener('touchend', function () { setTimeout(openFromSelection, 0); });
+    document.getElementById('fixcancel').addEventListener('click', close);
+    document.getElementById('fixapply').addEventListener('click', function () {
+      var wrong = document.getElementById('fixwrong').value.trim();
+      var right = document.getElementById('fixright').value.trim();
+      if (!right || right.indexOf('|||') !== -1) return;
+      if (wrong) english.value = english.value.split(wrong).join(right);
+      var hidden = document.createElement('input');
+      hidden.type = 'hidden'; hidden.name = 'name_fix'; hidden.value = bn + '|||' + right;
+      form.appendChild(hidden);
+      var li = document.createElement('li');
+      li.textContent = bn + ' → ' + right;
+      chips.appendChild(li);
+      close();
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  })();
+</script>
+
+{% endblock %}

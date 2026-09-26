@@ -287,7 +287,251 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **`Procfile`** defines the `run-bot` process type that `job.yaml` invokes.
 - **`$TOOL_DATA_DIR`** is automatically set by the Build Service; credential files are read from there.
 - **IPv4 enforcement** is applied at startup (via `config.py`) to avoid Kubernetes IPv6 issues.
-- **`toolforge/job.yaml`** registers the hourly background job; there is no web service.
+- **`toolforge/job.yaml`** registers the hourly background job. The Build Service
+  builds straight from GitHub and never clones the repo into the tool's home, so
+  this file is **not** on the bastion — fetch it before loading:
+
+  ```bash
+  curl -fsSL -o ~/job.yaml     https://raw.githubusercontent.com/Tausheef-Hassan/PID-Bangladesh-UploadBot/control-panel/toolforge/job.yaml
+  toolforge jobs load ~/job.yaml
+  ```
+
+  `toolforge jobs load` reports a missing file as `ERROR: Unable to parse yaml
+  file` — its `open()` sits inside the same `try` as the YAML parse and it
+  catches bare `Exception` (`jobs_cli/cli.py:1016`). If you see that error, check
+  the path exists before you go looking for a syntax problem.
+- **`Procfile` order matters.** `toolforge webservice buildservice start` runs the
+  *first* entry in the Procfile whatever it is called, so `web` must stay above
+  `run-bot`. With `run-bot` first the webservice would launch the pipeline, which
+  never binds port 8000, and the webservice would fail to come up.
+
+### Control panel
+
+A Flask app served at `https://<tool>.toolforge.org` shows whether the bot is
+running or crashed, streams the live log, and drives the job. It runs in its own
+pod and never imports the pipeline: it talks to the **Toolforge Jobs API**
+through [`toolforge-weld`](https://pypi.org/project/toolforge-weld/) (the client
+Wikimedia's own `toolforge` CLI is built on) and reads the files the bot leaves
+in `$TOOL_DATA_DIR`.
+
+| Control | Jobs API call |
+|---|---|
+| Run now | `POST …/jobs/pid-bot/restart` — "if the job is a cronjob, execute it right now" |
+| Pause / Resume | `PATCH …/jobs/pid-bot` rewriting `schedule` |
+| Stop | `DELETE …/jobs/pid-bot` |
+| Status | `GET …/jobs/pid-bot` → `status.short` |
+
+**Pause, not Stop, is the safe lever.** `main.py` writes every successful upload
+to `PIDDateData` in a single batch edit at the very end of a run, so killing a
+run mid-flight discards that run's registrations — those images get scraped,
+OCR'd and translated again next run, then rejected as duplicates. Pause rewrites
+the schedule to a date that never arrives (31 February), leaving the job
+definition and any in-flight run untouched. The Stop button says all this before
+you press it.
+
+### Reviewing descriptions from the panel
+
+Each upload's detail view shows the Bengali caption text above the English, so
+the translation can be checked against its source without leaving the page, and
+can correct the English description and add topic categories on Commons. The bot writes
+`{{en|1=<translation>{{Auto-translated PID English description}}}}`; the
+**Description is fine** button removes that marker and moves to the next file,
+because once a person has verified it, it is no longer auto-translated. Plain
+**Save** never touches the marker — only the button that says so does.
+
+Categories work like HotCat. Every category the file is in is shown as a chip,
+and typing offers suggestions fetched live from Commons — so a category that
+appears in the list is one that exists, which is what stops the backlog filling
+with red-linked typos. Suggestions are fetched server-side through
+`/categories/suggest`, sharing the same two-minute cache as the rest of the
+panel's Commons reads.
+
+Template-driven categories appear greyed and cannot be removed: `{{Date-PID}}`
+and `{{PD-BDGov-PID}}` call `Module:PIDCategoryHelper` and add
+`Category:PID-BD images from <Month Year>` and
+`Category:Bangladesh photographs taken on <date>` themselves. They are shown
+because they are the categories someone would otherwise add again by hand — but
+only topic categories are written back to the page.
+
+Edits are attributed to **you**, not the bot, through Wikimedia OAuth. Set it up
+once:
+
+1. Propose a consumer at
+   [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose):
+
+   | Field | Value |
+   |---|---|
+   | OAuth version | **OAuth 2.0**, client type **confidential** |
+   | Callback | `https://<tool>.toolforge.org/oauth/callback` |
+   | Grants | **Edit existing pages**, plus **Edit structured data** for captions |
+
+   The callback is compared character for character, so it must match the tool
+   URL exactly. Pointing the panel at a 1.0a consumer fails with
+   `Wrong OAuth version, E012`.
+
+   Registration happens at meta, but the **handshake runs on Commons** —
+   `commons.wikimedia.org/w/rest.php/oauth2`. A consumer scoped to commonswiki
+   gets a token from meta quite happily and is then refused by meta's own
+   resource endpoint: *The authorization headers in your request are not valid
+   for metawiki*. Applying the consumer to all projects instead would also
+   work, but this tool only ever edits Commons, so the narrower scope is the
+   right one to keep.
+
+2. Once approved, store the consumer as **envvars**, which keeps it off NFS
+   entirely:
+   ```bash
+   toolforge envvars create OAUTH_CONSUMER_KEY      # the Client ID, then Ctrl-D
+   toolforge envvars create OAUTH_CONSUMER_SECRET   # the Client secret
+   toolforge webservice buildservice restart
+   ```
+   Never pass a secret as a command-line argument — it lands in your shell
+   history and is visible to other users of the same bastion.
+
+   A `$TOOL_DATA_DIR/oauth.key` file (`KEY=VALUE` lines) is the fallback and the
+   local-development path. If you use it, `chmod 600` it.
+
+Without `oauth.key` the panel stays read-only for Commons and says so, rather
+than falling back to the bot's own credentials.
+
+`panel/wikitext.py` rewrites the page by counting braces, never by pattern
+matching — `{{en|1=…}}` contains nested templates. It refuses to save anything
+it cannot parse confidently, and rejects descriptions or category names
+containing markup: leaving a page alone always beats writing a mangled one.
+
+**Auth:** one sign-in for everything, through Wikimedia OAuth. Reads are public.
+Commons edits need any signed-in account — they are published under that name.
+Job controls (run, pause, stop, replacements, wayback retry) need an account
+that has been given access, because OAuth proves who you are and never that you
+may operate this tool.
+
+Access is managed from **Access** in the panel, not from the bastion. The
+username field suggests accounts that exist on Commons, so a misspelling cannot
+be granted access it would never use. One envvar sets the root of trust;
+everyone else is added from the web:
+
+```bash
+toolforge envvars create PANEL_OWNER      # your Wikimedia username
+toolforge envvars create SECRET_KEY       # random, signs the session cookie
+```
+
+The owner is the only account that can grant or revoke, and the only one the
+web UI cannot remove — so a maintainer whose session is stolen cannot lock the
+owner out or promote anyone. Grants live in `maintainers.json` in
+`$TOOL_DATA_DIR`, which the webservice writes itself; that file is a list of
+public usernames, never key material, which is why it can sit on NFS when a
+secret could not. Each entry records who granted it and when.
+
+The list is re-read on every request, so revoking someone takes effect on their
+next click. **No owner means the controls are off for everyone**, and an
+unreadable `maintainers.json` falls back to the owner alone — it fails closed.
+
+`SECRET_KEY` must be set and stable: it signs the session cookie, and both
+gunicorn workers have to agree on it or people get signed out at random. A
+`secret.key` file in `$TOOL_DATA_DIR` is the local-development fallback.
+
+`/healthz` reports which source each secret came from, so a deployment can be
+checked without exposing anything:
+
+```json
+{"ok": true, "oauth": "envvars", "secret_key": "envvars",
+ "owner_set": true, "maintainers": 2, "tool_data_dir": true}
+```
+
+Values are `envvars`, `file` or `missing` — names only, never key material. If
+this says `file` after running `toolforge envvars create`, the webservice has
+not been restarted, or a stale key file is shadowing the envvar.
+
+### Categorising in bulk
+
+The uncategorised queue is thousands of files, and a day of PID uploads is
+usually one event with one set of categories. Doing them one at a time is the
+difference between an afternoon and a month, so the queue page has checkboxes,
+a **Select all on this page**, and a box that applies the same categories to
+everything picked. Suggestions come from Commons as you type, on the line you
+are typing rather than the whole box.
+
+A confirmation names the categories and the file count before anything is
+written. Files that already have the category are skipped rather than saved
+again, and one file failing does not abandon the rest — the summary says how
+many went through and names the ones that did not.
+
+Capped at one page (48 files). Each file is its own Commons edit, there being no
+batch API for categories, so a larger selection risks the gunicorn timeout. If
+this ever needs to run over a whole month it should become a job rather than a
+request.
+
+### Not clobbering other people
+
+Every write here replaces the whole page, so an unguarded save silently reverts
+anyone who edited in between — which matters now that more than one person can
+have access. Each read returns the revision it read, the form carries it, and
+the write sends it as `basetimestamp`. Commons then refuses the edit rather than
+performing it, and the panel says so in words: *someone edited this page after
+you opened it, so nothing was saved*.
+
+### Flagging copyright problems
+
+`{{PD-BDGov-PID}}` covers Bangladesh government works. The backlog also contains
+photographs of artwork, logos, screenshots and agency photos that it does not
+cover, so the workbench can flag one without leaving the panel. Two tiers:
+
+| Tier | What it writes | Who sees it |
+|---|---|---|
+| Add to the review list | `[[Category:PID files with copyright concerns]]` | only this tool's **Copyright flags** queue |
+| Tag on Commons | `{{No permission since}}`, `{{No license since}}`, `{{No source since}}`, `{{Wrong license}}`, `{{Copyvio}}` | Commons maintainers act on these |
+
+The review list is the safe default: nothing is nominated for deletion and the
+flag is one category edit to undo. `{{Copyvio}}` is a speedy-deletion
+nomination, so the panel will not send one until the filename is typed out.
+
+The reason is always recorded in the edit summary, and a file already carrying a
+flag cannot be flagged again — resolve the first one on Commons instead.
+
+`Category:PID files with copyright concerns` must exist on Commons before the
+first flag; the panel files into categories but never creates them. It is also
+treated as a template-driven category, so editing topic categories cannot
+silently remove a flag.
+
+Deliberately not built: full deletion requests (`{{Delete}}` plus a DR subpage
+plus the daily log listing) and uploader talk-page notifications. Both are
+multi-edit workflows that leave a mess on Commons when half-applied.
+
+### Keeping secrets private on Toolforge
+
+`/data/project/<tool>` is **readable by every other tool on Toolforge** unless
+you tighten permissions, and OAuth credentials have leaked this way before
+([T286414](https://phabricator.wikimedia.org/T286414)). Prefer the envvars
+service, which stores values outside the shared filesystem — only the tool's
+code and its maintainers can read them, though the *names* are public:
+
+```bash
+toolforge envvars create SECRET_KEY             # paste, then Ctrl-D
+toolforge envvars create PANEL_OWNER            # your Wikimedia username
+toolforge envvars create OAUTH_CONSUMER_KEY
+toolforge envvars create OAUTH_CONSUMER_SECRET
+toolforge envvars list                          # names and values, as the tool
+toolforge webservice buildservice restart       # pick up the new values
+```
+
+If you keep secrets as files instead, restrict both the files and the directory:
+
+```bash
+chmod 600 ~/oauth.key ~/secret.key ~/gemini.key ~/ia.key ~/JSON.json           ~/drive_token.json ~/user-password.py
+chmod 750 ~                     # stop other tools listing your home
+ls -l ~/*.key                   # expect -rw------- and the tool as owner
+```
+
+Neither approach hides a secret from the tool's own **maintainers** — anyone who
+can `become` the tool can read anything it can. That is inherent to Toolforge;
+if a key is exposed, revoke it rather than trying to hide it.
+
+**The live log is public.** The panel serves `pid-bot.out` to anyone, so the bot
+must never print key material. `credentials.py` used to log the first six
+characters of the Internet Archive access key; it no longer does.
+
+**No third-party requests:** htmx is vendored into `panel/static/`, and Bengali
+text uses `local()` fonts via `unicode-range` rather than a font CDN — a
+Wikimedia tool should not hand visitors' IP addresses to someone else.
 
 ---
 
@@ -305,6 +549,10 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 | `src/commons_log.py` | Writes run summary to the bot's **daily** JSON log page on Commons |
 | `test_pipeline.py` | Offline self-checks for the two silent-failure modes (log size, Wayback tail) |
 | `src/wayback.py` | Async Wayback archiving; submits without polling, confirms from the queue next run |
+| `src/run_state.py` | Per-run outcome records (`run_state.json`) that the panel reads |
+| `panel/app.py` | Control panel: Jobs API proxy, auth, log tail |
+| `panel/templates/` | Server-rendered views; htmx polls the two that change |
+| `panel/static/panel.css` | Panel styling |
 | `data/translation_replacements.tsv` | Manual OCR correction rules applied before translation |
 | `wayback_pending.json` | Persistent queue for failed Wayback Machine submissions |
 
@@ -320,3 +568,4 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 - **Bounded log pages:** The Commons log is one JSON page per day. Every run rewrites the whole page, so a month of hourly runs on a single page would cross `$wgMaxArticleSize` and every subsequent save would fail silently. `wikitext_description` is stripped before logging for the same reason — it is the heaviest key and is rebuilt at upload time anyway.
 - **Bounded Wayback tail:** Archive submissions are fire-and-forget (`confirm=False`); polling SPN2 costs up to 90 s per URL and the pool thread is non-daemon, which kept the hourly job alive long after its work was done. Unconfirmed URLs sit in `wayback_pending.json` and the next run's confirmation pass clears them under a `RETRY_BUDGET` wall-clock cap (600 s).
 - **Toolforge ready:** The bot is a plain one-shot script; Toolforge's job scheduler owns the hourly cadence, so the process has no internal loop to supervise.
+- **Two status signals:** The Jobs API knows whether the pod is alive; `run_state.json` knows what the run actually did. The panel prefers the API and falls back to the file when the API is unreachable, rather than reporting "not loaded" for what is really a control-plane outage.

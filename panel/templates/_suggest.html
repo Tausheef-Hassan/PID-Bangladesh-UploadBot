@@ -1,0 +1,8 @@
+{# Suggestions for a field that must name something real. Everything listed
+   exists on Commons, which is the point: it is how a typo stops becoming a
+   red-linked category or an account that never signs in. #}
+{% for name in names %}
+  <button type="button" class="suggest" data-name="{{ name }}">{{ name }}</button>
+{% else %}
+  <p class="hint suggest-empty">{{ empty_message }}</p>
+{% endfor %}

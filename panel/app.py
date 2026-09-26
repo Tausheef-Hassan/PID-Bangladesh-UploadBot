@@ -1,0 +1,1297 @@
+# app.py
+# Control panel for the PID bot.
+#
+# The panel never imports the bot's pipeline. It drives the Toolforge job
+# through the Jobs API (via toolforge-weld, the client Wikimedia's own CLI is
+# built on) and reads the files the bot already writes into $TOOL_DATA_DIR.
+
+import functools
+import hashlib
+import re
+import json
+import os
+import secrets
+import threading
+import time
+import unicodedata
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+import humanize
+import yaml
+from croniter import croniter
+from markupsafe import Markup, escape
+from flask import (Flask, Response, abort, flash, redirect, render_template,
+                   request, session, url_for)
+from requests import HTTPError
+from toolforge_weld.api_client import ToolforgeClient
+from toolforge_weld.kubernetes_config import Kubeconfig
+
+import config
+from panel import commons, corrections, stats_view, wikiauth, wikitext
+from src import run_state, wayback
+from src import stats as bot_stats
+from src.name_resolver import resolve_names
+
+API_SERVER = 'https://api.svc.tools.eqiad1.wikimedia.cloud:30003/jobs/v1'
+
+# What each Jobs API status means for someone looking after this bot, rather
+# than what Kubernetes calls it.
+STATE_LABELS = {
+    'running': 'Running',
+    'pending': 'Starting',
+    'succeeded': 'Waiting',
+    'failed': 'Last run failed',
+    'unknown': 'Status unavailable',
+    'no-job': 'Stopped',
+    'api-down': "Can't reach Toolforge",
+}
+
+# Toolforge has no "disable this cronjob" flag, so pausing means rescheduling it
+# for 31 February — a date that never arrives. The definition survives intact.
+# ponytail: replace with a real disable if the Jobs API ever grows one.
+NEVER_FIRES = '0 0 31 2 *'
+
+# Enough log to see a whole run without reading a week of history into memory.
+LOG_TAIL_BYTES = 60_000
+
+# Hosts the source-image proxy will fetch from. Without this allowlist the
+# endpoint would be an open proxy sitting inside Toolforge's network.
+SOURCE_HOSTS = frozenset({
+    'pressinform.gov.bd', 'pressinform.portal.gov.bd', 'web.archive.org'})
+SOURCE_HOST_SUFFIXES = ('.oraclecloud.com', '.oraclecloud15.com')
+MAX_SOURCE_BYTES = 12 * 1024 * 1024
+
+# The panel fetches source images itself because pressinform's certificate does
+# not validate; the bot already works around this with verify=False.
+# Short retries and short timeouts: this session serves <img> requests, so it
+# must fail fast rather than retry for a minute behind a spinning thumbnail.
+source_session = config.http_session(retries=1, backoff=0.3)
+SOURCE_TIMEOUT = 8
+
+_UNAVAILABLE_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 260'>"
+    "<rect width='400' height='260' fill='#f4f8fb'/>"
+    "<text x='200' y='122' text-anchor='middle' font-family='sans-serif' "
+    "font-size='15' fill='#47637c'>Original no longer published</text>"
+    "<text x='200' y='146' text-anchor='middle' font-family='sans-serif' "
+    "font-size='13' fill='#8ba2b8'>and no archive snapshot was found</text>"
+    "</svg>").encode()
+
+app = Flask(__name__)
+# Cross-site forms can't ride a maintainer's session into the controls.
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Signing key for the session cookie. It must survive restarts and be identical
+# in every gunicorn worker: a per-process random key would sign each worker's
+# cookies differently and bounce people out at random. $SECRET_KEY first, then a
+# file for local development.
+_key_material = os.environ.get('SECRET_KEY', '').strip()
+if not _key_material:
+    try:
+        _key_material = Path(config.SECRET_KEY_PATH).read_text(encoding='utf-8').strip()
+    except OSError:
+        pass
+app.secret_key = (hashlib.sha256(('panel-session:' + _key_material).encode()).digest()
+                  if _key_material else secrets.token_bytes(32))
+
+
+# ── Toolforge Jobs API ────────────────────────────────────────────────────────
+
+def _kubeconfig_path():
+    """Locate the tool's kubeconfig.
+
+    $HOME is /app inside a Build Service container, so ~/.kube/config does not
+    resolve there — the tool's real home is $TOOL_DATA_DIR. Same trap config.py
+    already works around for the credential files.
+    """
+    for candidate in (os.environ.get('KUBECONFIG'),
+                      os.path.join(config.CREDS_DIR, '.kube', 'config'),
+                      os.path.expanduser('~/.kube/config')):
+        if candidate and os.path.exists(candidate):
+            return Path(candidate)
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def jobs_api():
+    """The Jobs API client. Built lazily so a missing cert renders an error
+    page instead of killing the worker at import time."""
+    path = _kubeconfig_path()
+    if path is None:
+        raise RuntimeError(
+            'No Toolforge kubeconfig found. The panel can only control the job '
+            'when it runs inside the tool account.')
+    return ToolforgeClient(
+        server=API_SERVER,
+        kubeconfig=Kubeconfig.from_path(path),
+        user_agent='pid-bot-panel',
+    )
+
+
+def _job_url(suffix=''):
+    return f'/tool/{config.TOOL_NAME}/jobs/{config.JOB_NAME}{suffix}'
+
+
+# job.yaml speaks the CLI's dialect; the API names three fields differently.
+_YAML_TO_API = {'command': 'cmd', 'image': 'imagename', 'mem': 'memory'}
+
+
+def job_definition():
+    """The pid-bot job as the Jobs API's create call wants it, read from the
+    job.yaml shipped in the image — the same file `toolforge jobs load` uses."""
+    path = os.path.join(config.SCRIPT_DIR, 'toolforge', 'job.yaml')
+    with open(path, encoding='utf-8') as f:
+        job = next(j for j in yaml.safe_load(f) if j['name'] == config.JOB_NAME)
+    body = {_YAML_TO_API.get(k, k): v for k, v in job.items()}
+    body['job_type'] = 'scheduled' if body.get('schedule') else 'one-off'
+    return body
+
+
+def fetch_job():
+    """Returns (job, reachable, error).
+
+    `reachable` separates "the API told us there is no such job" from "we could
+    not ask" — they look identical from a None return but mean opposite things
+    to whoever is reading the page at 3am. `error` is the reason we could not
+    ask, shown on the page, because "unreachable" alone sends you hunting.
+    """
+    try:
+        return jobs_api().get(_job_url(), display_messages=False).get('job'), True, ''
+    except HTTPError as e:
+        # A 404 is the API answering, not failing: there is no such job. Saying
+        # "unreachable" here sends you hunting a dead control plane when the
+        # real answer is that nothing is loaded.
+        if e.response is not None and e.response.status_code == 404:
+            return None, True, ''
+        app.logger.warning('Jobs API error: %r', e)
+        return None, False, str(e)
+    except Exception as e:
+        app.logger.warning('Jobs API unreachable: %r', e)
+        return None, False, str(e)
+
+
+def status_view(state, paused, reachable, latest):
+    """One sentence and the buttons that make sense, for the status box."""
+    if not reachable:
+        return {'tone': 'error', 'actions': [],
+                'sentence': "The panel can't reach Toolforge right now, so the buttons won't work."}
+    if state == 'no-job':
+        return {'tone': 'notice', 'actions': ['start'],
+                'sentence': 'Stopped. Nothing will run until you start it.'}
+    running = state in ('running', 'pending')
+    # Paused is checked before running: a pause made mid-run must still offer
+    # Resume, or the next click is a second Pause that records NEVER_FIRES as
+    # the schedule to go back to.
+    if paused:
+        return {'tone': 'warning',
+                'actions': ['resume', 'stop'] if running else ['run', 'resume', 'stop'],
+                'sentence': ('Running now; the schedule is paused, so nothing starts after this run.'
+                             if running else 'Paused. Nothing runs on schedule until you resume it.')}
+    if running:
+        n = (latest or {}).get('uploaded', 0) if (latest or {}).get('status') == 'running' else 0
+        so_far = f' {n} photo{"" if n == 1 else "s"} uploaded so far.' if n else ''
+        return {'tone': 'success', 'actions': ['pause', 'stop'],
+                'sentence': 'Running now.' + so_far}
+    if state == 'failed':
+        return {'tone': 'error', 'actions': ['run', 'pause', 'stop'],
+                'sentence': 'The last run failed. The errors are in the technical log below.'}
+    return {'tone': 'success', 'actions': ['run', 'pause', 'stop'],
+            'sentence': 'Waiting for the next run. The last one finished cleanly.'}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def owner():
+    """The account that owns this tool, from $PANEL_OWNER.
+
+    The root of trust, and the one thing the web UI cannot change. Everyone
+    else is granted access by the owner from /admin, so a maintainer whose
+    session is stolen cannot lock the owner out or promote anyone.
+    """
+    return _username(os.environ.get('PANEL_OWNER', ''))
+
+
+def granted():
+    """Maintainers the owner has added, newest last. [] if none or unreadable.
+
+    Kept as a file rather than an envvar because the tool has to write it at
+    runtime, and `toolforge envvars` needs credentials the webservice does not
+    have. That is safe here in a way it would not be for a secret: this is a
+    list of public usernames, so NFS being world-readable costs nothing.
+    """
+    try:
+        data = json.loads(Path(config.MAINTAINERS_PATH).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+    return [e for e in data if isinstance(e, dict) and e.get('user')]
+
+
+def save_granted(entries):
+    Path(config.MAINTAINERS_PATH).write_text(
+        json.dumps(entries, indent=1), encoding='utf-8')
+
+
+def maintainers():
+    """Every account allowed to operate the job: the owner, plus the granted.
+
+    Re-read on every call, so revoking someone takes effect on their very next
+    click rather than at the next deploy. No owner means nobody, because the
+    safe direction to fail is closed: a Wikimedia account proves who you are,
+    never that you are allowed to stop this tool.
+
+    MediaWiki treats underscores and spaces in usernames as the same character,
+    so both sides are normalised before comparing.
+    """
+    people = {_username(e['user']) for e in granted()}
+    if owner():
+        people.add(owner())
+    return {p for p in people if p}
+
+
+def _username(name):
+    return (name or '').strip().replace('_', ' ')
+
+
+def current_user():
+    """The signed-in Wikimedia account, or ''."""
+    return _username(session.get('wiki_user'))
+
+
+def is_maintainer():
+    return bool(current_user()) and current_user() in maintainers()
+
+
+def is_owner():
+    return bool(owner()) and current_user() == owner()
+
+
+def requires_owner(view):
+    """Gate granting and revoking. Only the owner may change who has access."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not owner():
+            abort(503, 'No PANEL_OWNER is set on the server.')
+        if not is_owner():
+            abort(403, 'Only the tool owner can change who has access.')
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def requires_maintainer(view):
+    """Gate a job control.
+
+    Three distinct answers, because they need three distinct fixes: the server
+    has no allowlist, you are not signed in, or you are signed in as someone
+    who is not a maintainer.
+    """
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not maintainers():
+            abort(503, 'Controls are off: no PANEL_OWNER set on the server.')
+        if not current_user():
+            abort(403, 'Sign in with your Wikimedia account to use the controls.')
+        if not is_maintainer():
+            abort(403, f'{current_user()} is not a maintainer of this tool.')
+        return view(*args, **kwargs)
+    return wrapped
+
+
+@app.context_processor
+def nav_state():
+    """Every page renders the navbar, so its state is global context."""
+    return {'wiki_user': session.get('wiki_user'),
+            'wiki_configured': wikiauth.consumer() is not None,
+            'is_maintainer': is_maintainer(),
+            'is_owner': is_owner(),
+            'controls_enabled': bool(maintainers())}
+
+
+# ── Wikimedia OAuth ───────────────────────────────────────────────────────────
+#
+# One sign-in for everything. OAuth says who you are, which is what a Commons
+# edit needs — it is published under your name. Operating the job needs more
+# than that, so the maintainer allowlist above decides who may, and the same
+# session answers both questions.
+
+def _redirect_uri():
+    """Must match the callback on the consumer registration, character for
+    character — MediaWiki compares them exactly."""
+    return url_for('oauth_callback', _external=True)
+
+
+@app.get('/oauth/start')
+def oauth_start():
+    try:
+        authorize_url, state = wikiauth.start(_redirect_uri())
+    except Exception as e:
+        flash(str(e))
+        return redirect(url_for('index'))
+    session['oauth_state'] = state
+    return redirect(authorize_url)
+
+
+@app.get('/oauth/callback')
+def oauth_callback():
+    # 2.0 has no request token, so `state` is the only thing tying this call
+    # back to a sign-in we started. Without the check, anyone could hand a
+    # signed-in user a link that logs them into someone else's account.
+    expected = session.pop('oauth_state', None)
+    if not expected or request.args.get('state') != expected:
+        flash('That sign-in attempt expired. Try again.')
+        return redirect(url_for('index'))
+
+    if request.args.get('error'):
+        flash('Wikimedia declined the sign-in: %s' % request.args['error'])
+        return redirect(url_for('index'))
+
+    try:
+        token, username = wikiauth.finish(
+            request.args.get('code', ''), _redirect_uri())
+    except Exception as e:
+        app.logger.warning('OAuth handshake failed: %r', e)
+        flash('Wikimedia sign-in failed: %s' % e)
+        return redirect(url_for('index'))
+
+    session['wiki_token'] = token
+    session['wiki_user'] = username
+    flash(f'Signed in to Commons as {username}.')
+    return redirect(request.args.get('next') or url_for('uploads'))
+
+
+@app.post('/oauth/logout')
+def oauth_logout():
+    session.pop('wiki_token', None)
+    session.pop('wiki_user', None)
+    return redirect(url_for('uploads'))
+
+
+# ── Reading what the bot leaves behind ────────────────────────────────────────
+
+# Lines worth picking out of a wall of scrolling output.
+TROUBLE = re.compile(
+    r'error|failed|failure|traceback|exception|exhausted|429|timed out|'
+    r'giving up|no separator|warning', re.I)
+GOOD = re.compile(r'upload successful|succeeded|success|confirmed|created', re.I)
+HEADING = re.compile(r'^(=+$|STEP |Processing row |Batch updating|PROCESSING)')
+
+
+def read_log(stream='out'):
+    """Tail of the job's output, written by `filelog: true`.
+
+    Reads the file rather than the API's log endpoint: the file outlives the
+    pod, so the log survives between hourly runs.
+    """
+    suffix = 'err' if stream == 'err' else 'out'
+    path = os.path.join(config.CREDS_DIR, f'{config.JOB_NAME}.{suffix}')
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            f.seek(max(0, size - LOG_TAIL_BYTES))
+            raw = f.read()
+    except OSError:
+        return ''
+    text = raw.decode('utf-8', errors='replace')
+    # Drop the leading partial line when the seek landed mid-line.
+    return text.split('\n', 1)[-1] if size > LOG_TAIL_BYTES else text
+
+
+def log_lines(stream='out', query='', errors_only=False):
+    """Tail split into classified lines, filtered. Returns (lines, total)."""
+    everything = read_log(stream).split('\n')
+    total = len(everything)
+
+    kept = []
+    for line in everything:
+        if errors_only and not TROUBLE.search(line):
+            continue
+        if query and query.lower() not in line.lower():
+            continue
+        if TROUBLE.search(line):
+            kind = 'bad'
+        elif GOOD.search(line):
+            kind = 'good'
+        elif HEADING.match(line):
+            kind = 'head'
+        else:
+            kind = ''
+        kept.append({'text': line, 'kind': kind})
+    return kept, total
+
+
+def _parse(iso):
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+
+
+def heartbeat(records, slots=72):
+    """One tick per recent run for the strip at the top of the page.
+
+    Height encodes images uploaded, colour encodes outcome. Three days of
+    hourly runs fits in 72 ticks.
+    """
+    recent = records[-slots:]
+    ceiling = max([r.get('uploaded', 0) for r in recent] or [0]) or 1
+    ticks = []
+    for r in recent:
+        uploaded = r.get('uploaded', 0)
+        status = r.get('status', 'unknown')
+        started = _parse(r.get('started_at'))
+        ticks.append({
+            'status': status,
+            # Floor at 8% so a zero-upload run is still a visible tick, not a gap.
+            'height': round(8 + 92 * (uploaded / ceiling)) if uploaded else 8,
+            'label': '{}, {} uploaded{}'.format(
+                humanize.naturaltime(datetime.now(timezone.utc) - started) if started else 'unknown time',
+                uploaded,
+                f", {r['failed']} failed" if r.get('failed') else ''),
+        })
+    return ticks
+
+
+def page_context():
+    job, api_reachable, api_error = fetch_job()
+    records = run_state.load()
+    latest = records[-1] if records else None
+    status = (job or {}).get('status', {})
+
+    next_run = None
+    schedule = (job or {}).get('schedule')
+    if schedule and schedule != NEVER_FIRES:
+        try:
+            next_run = croniter(schedule, datetime.now(timezone.utc)).get_next(datetime)
+        except (ValueError, KeyError):
+            next_run = None
+
+    if job:
+        state = status.get('short', 'unknown')
+    elif not api_reachable:
+        # Fall back to the bot's own record: an unreachable control plane is no
+        # reason to stop reporting what the last run actually did.
+        state = 'running' if (latest and latest.get('status') == 'running'
+                              and not latest.get('finished_at')) else 'api-down'
+    else:
+        state = 'no-job'
+
+    return {
+        'job': job,
+        'state': state,
+        'state_label': STATE_LABELS.get(state, state),
+        'state_detail': ', '.join(status.get('messages', []) or []),
+        'duration': status.get('duration', ''),
+        'paused': schedule == NEVER_FIRES,
+        'api_reachable': api_reachable,
+        'schedule': schedule,
+        'next_run': next_run,
+        'next_in': humanize.naturaldelta(next_run - datetime.now(timezone.utc)) if next_run else '',
+        'latest': latest,
+        'started_ago': (humanize.naturaltime(
+            datetime.now(timezone.utc) - _parse(latest.get('started_at')))
+            if latest and _parse(latest.get('started_at')) else ''),
+        'ticks': heartbeat(records),
+        'api_error': api_error,
+        'status': status_view(state, schedule == NEVER_FIRES, api_reachable, latest),
+    }
+
+
+# ── Views ─────────────────────────────────────────────────────────────────────
+
+@app.get('/')
+def index():
+    view = _log_view()
+    lines, total = log_lines(view['stream'], view['query'], view['errors_only'])
+    return render_template(
+        'index.html', lines=lines, total=total,
+        updated=datetime.now().strftime('%H:%M:%S'),
+        # htmx polls this URL, so the filters must travel with it.
+        log_url=url_for('partial_log', stream=view['stream'],
+                        q=view['query'] or None,
+                        level='errors' if view['errors_only'] else None,
+                        live=None if view['live'] else '0'),
+        **view, **page_context())
+
+
+@app.get('/queue')
+def queue():
+    return render_template('queue.html')
+
+
+@app.get('/partials/runs')
+def partial_runs():
+    """The run strip polls on its own clock: it changes hourly, not every 5s."""
+    return render_template('_runs.html', **page_context())
+
+
+@app.get('/partials/dashboard')
+def partial_dashboard():
+    """Polled by htmx; same context, just the part that changes."""
+    return render_template('_dashboard.html', **page_context())
+
+
+def _log_view():
+    """Filter state shared by the log partial and the raw download."""
+    return {
+        'stream': 'err' if request.args.get('stream') == 'err' else 'out',
+        'query': request.args.get('q', '').strip(),
+        'errors_only': request.args.get('level') == 'errors',
+        'live': request.args.get('live') != '0',
+    }
+
+
+@app.get('/partials/log')
+def partial_log():
+    view = _log_view()
+    lines, total = log_lines(view['stream'], view['query'], view['errors_only'])
+    return render_template('_log.html', lines=lines, total=total,
+                           updated=datetime.now().strftime('%H:%M:%S'), **view)
+
+
+@app.get('/log.txt')
+def log_download():
+    """The raw tail, for grepping somewhere more comfortable than a browser."""
+    view = _log_view()
+    return Response(read_log(view['stream']), mimetype='text/plain; charset=utf-8')
+
+
+# ── Controls ──────────────────────────────────────────────────────────────────
+
+@app.post('/run')
+@requires_maintainer
+def run_now():
+    # The Jobs API spec for restart: "If the job is a cronjob, execute it right now."
+    jobs_api().post(_job_url('/restart'), display_messages=False)
+    flash('Run started.')
+    return redirect(url_for('index'))
+
+
+@app.post('/start')
+@requires_maintainer
+def start():
+    """Re-create the job Stop deleted, then run it once straight away."""
+    jobs_api().post(f'/tool/{config.TOOL_NAME}/jobs/', json=job_definition(),
+                    display_messages=False)
+    jobs_api().post(_job_url('/restart'), display_messages=False)
+    flash('Job loaded and started.')
+    return redirect(url_for('index'))
+
+
+@app.post('/pause')
+@requires_maintainer
+def pause():
+    job, _, _ = fetch_job()
+    if not job:
+        abort(404, 'No pid-bot job is loaded.')
+    if job.get('schedule') == NEVER_FIRES:
+        flash('Already paused.')
+        return redirect(url_for('index'))
+    session['schedule_before_pause'] = job.get('schedule')
+    jobs_api().patch(_job_url(), json={'schedule': NEVER_FIRES}, display_messages=False)
+    flash('Paused. The job definition is intact; nothing will fire until you resume.')
+    return redirect(url_for('index'))
+
+
+@app.post('/resume')
+@requires_maintainer
+def resume():
+    schedule = session.pop('schedule_before_pause', None) or '@hourly'
+    jobs_api().patch(_job_url(), json={'schedule': schedule}, display_messages=False)
+    flash(f'Resumed on {schedule}.')
+    return redirect(url_for('index'))
+
+
+@app.post('/stop')
+@requires_maintainer
+def stop():
+    """Delete the job, killing any pod mid-run.
+
+    main.py writes every successful upload to PIDDateData in one batch edit at
+    the very end, so a kill discards this run's registrations: those images get
+    scraped, OCR'd and translated again next run, then rejected as duplicates.
+    The template says so before the button is pressed.
+    """
+    jobs_api().delete(_job_url(), display_messages=False)
+    flash('Job stopped and removed. Press Start job to bring it back.')
+    return redirect(url_for('index'))
+
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+
+@app.get('/replacements')
+def replacements():
+    return render_template('replacements.html',
+                           rows=corrections.rows(config.REPLACEMENTS_PATH))
+
+
+@app.post('/replacements')
+@requires_maintainer
+def save_replacements():
+    path, form = config.REPLACEMENTS_PATH, request.form
+    action = form.get('action')
+    try:
+        if action == 'add':
+            ok = corrections.add(path, form.get('bn', ''), form.get('en', ''), current_user())
+            flash('Added. It applies from the next run.' if ok
+                  else 'That Bengali already has a correction. Edit it instead.')
+        elif action == 'update':
+            ok = corrections.update(path, form.get('old_bn', ''), form.get('bn', ''),
+                                    form.get('en', ''), current_user())
+            flash('Saved. It applies from the next run.' if ok else
+                  'Not saved: another correction already has that Bengali, '
+                  'or this one was deleted meanwhile.')
+        elif action == 'delete':
+            corrections.delete(path, form.get('bn', ''))
+            flash('Deleted.')
+        else:
+            abort(400)
+    except ValueError:
+        flash("Not saved: both fields are needed, on one line, without '|||'.")
+    return redirect(url_for('replacements'))
+
+
+# ── Who has access ────────────────────────────────────────────────────────────
+
+@app.get('/admin')
+def admin():
+    """The owner's view of who can operate this tool.
+
+    Visible to any maintainer, so someone can see why they do or do not have
+    access; only the owner can change it.
+    """
+    return render_template('admin.html', owner=owner(), granted=granted())
+
+
+@app.post('/admin')
+@requires_owner
+def save_admin():
+    entries = granted()
+    name = _username(request.form.get('user', ''))
+    action = request.form.get('action', '')
+
+    if action == 'revoke':
+        kept = [e for e in entries if _username(e['user']) != name]
+        if len(kept) == len(entries):
+            flash(f'{name} was not on the list.')
+        else:
+            save_granted(kept)
+            flash(f'Removed {name}. They lose access on their next click.')
+        return redirect(url_for('admin'))
+
+    if not name:
+        flash('Type the Wikimedia username to add.')
+    elif name == owner():
+        flash('You are the owner; that access cannot be granted or taken away here.')
+    elif any(_username(e['user']) == name for e in entries):
+        flash(f'{name} already has access.')
+    else:
+        entries.append({'user': name, 'granted_by': current_user(),
+                        'at': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+        save_granted(entries)
+        flash(f'{name} can now run the job. They need to sign in with Wikimedia.')
+    return redirect(url_for('admin'))
+
+
+# ── Uploaded images ───────────────────────────────────────────────────────────
+
+@app.get('/partials/gallery')
+def partial_gallery():
+    """Lazy-loaded so a slow Commons fetch never delays the status card."""
+    try:
+        uploads = commons.recent_uploads(limit=8)
+        error = ''
+    except Exception as e:
+        app.logger.warning('Commons unreachable: %r', e)
+        uploads, error = [], "Couldn't reach Commons for the upload list."
+    return render_template('_gallery.html', uploads=uploads, error=error,
+                           thumb=commons.thumb_url, filepage=commons.file_page_url)
+
+
+@app.get('/upload/<unique_id>')
+def upload_detail(unique_id):
+    """Old links: the file page is where uploads are reviewed now."""
+    record = commons.find_upload(unique_id)
+    if not record:
+        abort(404, 'No upload recorded with that id.')
+    return redirect(url_for('file_detail', title=f"File:{record['filename']}"))
+
+
+def _allowed_source(url):
+    host = (urlparse(url).hostname or '').lower()
+    return host in SOURCE_HOSTS or host.endswith(SOURCE_HOST_SUFFIXES)
+
+
+@functools.lru_cache(maxsize=512)
+def _archived_copy(url, bucket):
+    """Wayback snapshot for a source image PID has removed, or ''.
+
+    Deliberately not wayback.get_wayback_url(): that helper rides the bot's
+    10-retry session with 30s timeouts, which is right for a batch job and far
+    too slow inside an image request. Cached per two-minute bucket so a dead
+    image costs one lookup, not one per page view.
+    """
+    try:
+        r = source_session.get('https://archive.org/wayback/available',
+                               params={'url': url}, timeout=6)
+        closest = r.json().get('archived_snapshots', {}).get('closest', {})
+        return closest.get('url') or ''
+    except Exception:
+        return ''
+
+
+# ── Commons work queues ───────────────────────────────────────────────────────
+#
+# The queues come from Commons, not from PIDDateData: the backlog is tens of
+# thousands of files, most uploaded long before this panel existed.
+
+QUEUES = {
+    'review': {
+        'label': 'Check the English',
+        'blurb': 'The English was written by Gemini and nobody has checked it yet. '
+                 'Compare it with the Bengali, fix it, then mark it checked.',
+    },
+    'uncategorised': {
+        'label': 'Needs categories',
+        'blurb': 'Not in any topic category yet. Add what the photo shows.',
+        'category': commons.UNCATEGORISED,
+    },
+    'flagged': {
+        'label': 'Copyright questions',
+        'blurb': 'Flagged as a possible copyright problem. Nothing has been '
+                 'nominated for deletion; these are waiting for a decision.',
+        'category': wikitext.CONCERNS_CATEGORY,
+    },
+    'month': {
+        'label': 'By month',
+        'blurb': 'Everything the bot uploaded in one month.',
+    },
+    'all': {
+        'label': 'All',
+        'blurb': 'Every PID photo on Commons, including ones uploaded before the bot.',
+    },
+}
+
+# Every PID file carries this licence, whoever uploaded it, so it is what
+# "All" means to Commons search.
+PID_FILES = 'hastemplate:"PD-BDGov-PID"'
+
+
+def _this_month():
+    now = datetime.now(timezone.utc)
+    return commons.month_categories(now.year)[now.month - 1]
+
+
+def search_query(queue, month, q):
+    """The CirrusSearch string for a list plus typed text, or None when the
+    list is a category and nothing was typed (a category listing is cheaper
+    and pages with a cursor)."""
+    q = ' '.join((q or '').split())
+    if q.count('"') % 2:
+        q = q.replace('"', ' ')         # an unclosed phrase would swallow the rest
+        q = ' '.join(q.split())
+    if queue in ('review', 'all'):
+        base = commons.REVIEW_SEARCH if queue == 'review' else PID_FILES
+        if month:
+            base += ' incategory:"%s"' % month
+    elif not q:
+        return None
+    else:
+        base = 'incategory:"%s"' % (QUEUES[queue].get('category') or month or _this_month())
+    return f'{base} {q}'.strip()
+
+
+def _queue_titles(queue, month, offset, cursor, q=''):
+    """(titles, next_offset, next_cursor, total) for one page of a queue."""
+    bucket = commons._bucket()
+    search = search_query(queue, month, q)
+    if search is None:
+        # A category list with nothing typed; 'month' just picks its own.
+        target = QUEUES[queue].get('category') or month or _this_month()
+        titles, nxt = commons.category_page(target, cursor, bucket)
+        return titles, None, nxt, commons.category_size(target, bucket)
+    titles, total = commons.search_page(search, offset, bucket)
+    return titles, offset + len(titles), '', total
+
+
+@app.get('/uploads')
+def uploads():
+    queue = request.args.get('queue', 'review')
+    if queue not in QUEUES:
+        queue = 'review'
+    year = request.args.get('year', str(datetime.now(timezone.utc).year))
+    month = request.args.get('month', '')
+    offset = int(request.args.get('offset', 0) or 0)
+    cursor = request.args.get('cursor', '')
+    q = request.args.get('q', '').strip()
+
+    titles, next_offset, next_cursor, total = _queue_titles(
+        queue, month, offset, cursor, q)
+    bucket = commons._bucket()
+
+    return render_template(
+        'uploads.html', queue=queue, queues=QUEUES, year=year, month=month, q=q,
+        titles=titles, total=total, offset=offset,
+        next_offset=next_offset, next_cursor=next_cursor,
+        months=commons.month_categories(year),
+        years=[str(y) for y in range(datetime.now(timezone.utc).year, 2014, -1)],
+        uncategorised_count=commons.category_size(commons.UNCATEGORISED, bucket),
+        thumb=commons.thumb_url)
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+@app.get('/stats', endpoint='stats')
+def stats_page():
+    today = datetime.now(timezone.utc).date()
+    bucket = commons._bucket()
+    rows = []
+    # 12 months plus the 12 before them, for the comparison, can span three registries.
+    for year in (today.year - 2, today.year - 1, today.year):
+        rows += [dict(t) for t in commons._uploads_raw(year, bucket)]
+    view = stats_view.build(bot_stats.load(), rows, request.args.get('range', '30d'), today)
+    return render_template('stats.html', view=view, ranges=[
+        ('7d', '7 days'), ('30d', '30 days'), ('12m', '12 months')])
+
+
+# One page of the queue. Anything larger risks the gunicorn timeout, because
+# each file is its own Commons edit and there is no batch API for categories.
+# ponytail: if this ever needs to run over a whole month, it becomes a job
+# rather than a request.
+BULK_LIMIT = 48
+
+
+@app.post('/uploads/categorise')
+def bulk_categorise():
+    """Add the same categories to several files at once.
+
+    The uncategorised queue is thousands of files, and PID uploads from one day
+    are usually one event with one set of categories. Doing them individually is
+    the difference between an afternoon and a month.
+    """
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.args.get('queue') or request.form.get('queue', 'uncategorised'),
+              'year': request.form.get('year', ''),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', ''),
+              'q': request.form.get('q', '')}
+
+    titles = request.form.getlist('titles')[:BULK_LIMIT]
+    # Newlines only: category names contain commas ("Dhaka, Bangladesh").
+    wanted = [c.strip() for c in request.form.get('categories', '').splitlines()
+              if c.strip()]
+
+    if not titles or not wanted:
+        flash('Pick at least one file and one category.')
+        return redirect(url_for('uploads', **onward))
+
+    done, failed = [], []
+    for title in titles:
+        page, revision = wikiauth.fetch_wikitext(title)
+        if page is None:
+            failed.append((title, 'could not be read'))
+            continue
+        try:
+            existing = wikitext.read_categories(page)
+            merged = existing + [c for c in wanted if c not in existing]
+            if merged == existing:
+                continue                      # already had every one of them
+            updated = wikitext.write_categories(page, merged)
+            wikiauth.edit_description(
+                token, title, updated,
+                'Added %s via the PID control panel' % ', '.join(wanted),
+                basetimestamp=revision)
+            done.append(title)
+        except Exception as e:
+            failed.append((title, str(e)))
+
+    said = '%d file%s' % (len(done), '' if len(done) == 1 else 's')
+    if failed:
+        flash('Added %s to %s. %d failed: %s' % (
+            ', '.join(wanted), said, len(failed),
+            '; '.join('%s (%s)' % (t[len('File:'):], why) for t, why in failed[:3])))
+    else:
+        flash('Added %s to %s.' % (', '.join(wanted), said))
+    return redirect(url_for('uploads', **onward))
+
+
+def highlight_names(text, matches):
+    """The Bengali, HTML-escaped, with each Wikidata-matched name marked."""
+    text = unicodedata.normalize('NFC', text or '')
+    names = {bn: (en, qid) for bn, en, qid in matches}
+    if not names:
+        return escape(text)
+    # One pass, longest name first, over the raw text: replacing inside output
+    # that already holds <mark> tags nests them or lands in a title attribute.
+    pattern = '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    out = []
+    for i, part in enumerate(re.split(f'({pattern})', text)):
+        if i % 2:
+            en, qid = names[part]
+            out.append(f'<mark class="wd" title="{escape(en)} ({escape(qid)})">{escape(part)}</mark>')
+        else:
+            out.append(str(escape(part)))
+    return Markup(''.join(out))
+
+
+@app.get('/file/<path:title>')
+def file_detail(title):
+    """One file's editor, with prev/next that walk the queue it came from.
+
+    Staying inside the queue is the point: a backlog of eight thousand is only
+    tractable if finishing one file puts you on the next one.
+    """
+    if not title.startswith('File:'):
+        abort(404)
+
+    queue = request.args.get('queue', 'review')
+    month = request.args.get('month', '')
+    offset = int(request.args.get('offset', 0) or 0)
+    cursor = request.args.get('cursor', '')
+    q = request.args.get('q', '').strip()
+
+    titles, _next_offset, _next_cursor, total = _queue_titles(
+        queue, month, offset, cursor, q)
+    position = titles.index(title) if title in titles else None
+
+    page, revision = wikiauth.fetch_wikitext(title)
+    english, auto_translated, categories, bengali = '', True, [], ''
+    parse_error, source_url, existing_tag = '', '', ''
+    if page is None:
+        parse_error = "Couldn't read the page from Commons."
+    else:
+        source_url = wikitext.read_source_url(page)
+        existing_tag = wikitext.read_copyright_tag(page)
+        # Categories are read separately from the description. They are plain
+        # [[Category:…]] links and parse fine on their own, so an unusual
+        # description — common in the 2015-2024 backlog — must not take the
+        # category editor down with it.
+        categories = wikitext.read_categories(page)
+        bengali = wikitext.read_bengali(page)
+        try:
+            english, auto_translated = wikitext.read_english(page)
+        except wikitext.Unparseable as e:
+            parse_error = 'Not in the shape the bot writes (%s), so the description is not editable here.' % e
+
+    # Short timeout: this runs on every page view, so a slow replica must not
+    # stall walking the review queue. One entry per name, however often it recurs.
+    name_matches = list({m[0]: m for m in (resolve_names(bengali, timeout=3)[1]
+                                           if bengali else [])}.values())
+
+    bucket = commons._bucket()
+
+    # Three states, and the difference is whether the category is written on the
+    # page at all. Anything in the wikitext is editable, including what the bot
+    # put there. The date and PID-BD ones come from Module:PIDCategoryHelper at
+    # render time, so no wikitext edit can remove them and saying otherwise
+    # would be a lie. The copyright flag is on the page but has its own control.
+    on_the_page = [name.strip()
+                   for name, _sort in wikitext.CATEGORY_LINE.findall(page or '')]
+    editable = [c.strip() for c in categories]
+    locked = [(c, 'copyright flag — use the flag control below')
+              for c in on_the_page if wikitext.PROTECTED_CATEGORY.match(c)]
+    locked += [(c, 'added by a template — no wikitext edit can remove it')
+               for c in commons.categories_of(title, bucket)
+               if c not in on_the_page]
+
+    return render_template(
+        'file.html', title=title, filename=title[len('File:'):],
+        english=english, auto_translated=auto_translated, bengali=bengali,
+        categories="\n".join(categories), editable_categories=editable,
+        locked_categories=locked, base_revision=revision or '',
+        parse_error=parse_error,
+        source_url=source_url, caption=commons.caption(title, bucket),
+        prev_title=titles[position - 1] if position else None,
+        next_title=(titles[position + 1]
+                    if position is not None and position + 1 < len(titles) else None),
+        position=position, page_count=len(titles), total=total,
+        queue=queue, month=month, offset=offset, cursor=cursor, q=q, queues=QUEUES,
+        name_matches=name_matches,
+        bengali_html=highlight_names(bengali, name_matches),
+        existing_tag=existing_tag, reasons=wikitext.REASONS,
+        confirm_reason=wikitext.NEEDS_CONFIRMATION,
+        thumb=commons.thumb_url, filepage=commons.file_page_url)
+
+
+@app.post('/file/<path:title>')
+def save_file(title):
+    """Apply caption, description and categories to one Commons file."""
+    if not title.startswith('File:'):
+        abort(404)
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.form.get('queue', 'review'),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', ''),
+              'q': request.form.get('q', '')}
+
+    page, _revision = wikiauth.fetch_wikitext(title)
+    if page is None:
+        flash("Couldn't read that page from Commons; nothing was changed.")
+        return redirect(url_for('file_detail', title=title, **onward))
+
+    changed = []
+    bucket = commons._bucket()
+
+    new_caption = request.form.get('caption', '').strip()
+    if new_caption and new_caption != commons.caption(title, bucket):
+        try:
+            wikiauth.set_caption(
+                token, commons.page_id(title, bucket), new_caption)
+            changed.append('caption')
+        except Exception as e:
+            flash('Caption not saved: %s' % e)
+
+    # The marker is only ever cleared by the button that says so. A plain Save
+    # reads the page's own state rather than the form, so editing a description
+    # never silently drops a marker someone else still needs to see.
+    try:
+        _current, still_marked = wikitext.read_english(page)
+    except wikitext.Unparseable:
+        still_marked = False
+    clearing = request.form.get('action') == 'clear-next'
+
+    updated = page
+    try:
+        updated = wikitext.write_english(
+            page, request.form.get('english', ''),
+            mark_auto_translated=still_marked and not clearing)
+        updated = wikitext.write_categories(
+            updated, request.form.get('categories', '').splitlines())
+    except wikitext.Unparseable as e:
+        flash('Description not saved: %s' % e)
+        updated = page
+
+    if updated != page:
+        try:
+            wikiauth.edit_description(
+                token, title, updated,
+                'Checked against the Bengali; cleared the auto-translated marker'
+                if clearing else
+                'Reviewed the auto-translated description via the PID control panel',
+                basetimestamp=request.form.get('base_revision'))
+            changed.append('marker cleared' if clearing
+                           else 'description and categories')
+        except Exception as e:
+            flash('Commons refused the edit: %s' % e)
+
+    if request.form.get('remember_names') == 'on' and is_maintainer():
+        remembered, skipped = 0, []
+        for pair in request.form.getlist('name_fix'):
+            bn, _, en = pair.partition('|||')
+            try:
+                remembered += corrections.add(config.REPLACEMENTS_PATH, bn, en, current_user())
+            except ValueError:
+                skipped.append(' '.join(bn.split()))
+        if skipped:
+            flash('%d name fix%s not remembered (select the words within one line): %s'
+                  % (len(skipped), '' if len(skipped) == 1 else 'es', ', '.join(skipped)))
+        if remembered:
+            changed.append(f'{remembered} name fix{"" if remembered == 1 else "es"} '
+                           f'remembered for future uploads')
+
+    flash('Saved %s.' % ' and '.join(changed) if changed else 'Nothing to save.')
+
+    # Land on the next file, so reviewing a queue is one continuous pass.
+    onward_title = title
+    if request.form.get('action') in ('save-next', 'clear-next'):
+        onward_title = request.form.get('next_title') or title
+    return redirect(url_for('file_detail', title=onward_title, **onward))
+
+
+@app.get('/categories/suggest')
+def suggest_categories():
+    """Commons categories matching what someone is typing.
+
+    Server-side so the browser never talks to the Commons API directly, and so
+    the suggestions share the same two-minute cache as everything else here.
+    """
+    return render_template(
+        '_suggest.html',
+        names=commons.suggest_categories(request.args.get('q', ''),
+                                         commons._bucket()),
+        empty_message='No category by that name on Commons.')
+
+
+@app.get('/users/suggest')
+@requires_owner
+def suggest_users():
+    """Commons accounts matching what the owner is typing.
+
+    Behind the same gate as granting itself: only the owner ever sees the field,
+    so there is no reason for this to be one more endpoint the world can ask.
+    """
+    return render_template(
+        '_suggest.html',
+        names=commons.suggest_users(request.args.get('user', ''),
+                                    commons._bucket()),
+        empty_message='No account by that name on Commons.')
+
+
+@app.post('/file/<path:title>/tag')
+def tag_file(title):
+    """Flag one file as a possible copyright problem.
+
+    The mild reasons only add a review category; the severe ones write the
+    maintenance templates Commons administrators act on, which is why the
+    heaviest of them will not go through without the filename typed out.
+    """
+    if not title.startswith('File:'):
+        abort(404)
+    token = session.get('wiki_token')
+    if not token:
+        abort(403, 'Sign in to Commons first.')
+
+    onward = {'queue': request.form.get('queue', 'review'),
+              'month': request.form.get('month', ''),
+              'offset': request.form.get('offset', 0),
+              'cursor': request.form.get('cursor', ''),
+              'q': request.form.get('q', '')}
+    back = redirect(url_for('file_detail', title=title, **onward))
+
+    reason = request.form.get('reason', '')
+    note = request.form.get('note', '')
+
+    if reason == wikitext.NEEDS_CONFIRMATION:
+        typed = request.form.get('confirm', '').strip()
+        if typed != title[len('File:'):]:
+            flash('Type the filename exactly to confirm a copyright violation. '
+                  'Nothing was changed.')
+            return back
+
+    page, revision = wikiauth.fetch_wikitext(title)
+    if page is None:
+        flash("Couldn't read that page from Commons; nothing was changed.")
+        return back
+
+    try:
+        updated = wikitext.tag_copyright(page, reason, note)
+    except wikitext.Unparseable as e:
+        flash('Not flagged: %s' % e)
+        return back
+
+    try:
+        wikiauth.edit_description(token, title, updated,
+                                  wikitext.flag_summary(reason, note),
+                                  basetimestamp=request.form.get('base_revision'))
+    except Exception as e:
+        flash('Commons refused the edit: %s' % e)
+        return back
+
+    flash('Flagged: %s.' % wikitext.REASONS[reason][0])
+
+    # Flagging is a verdict, so move on the way saving does.
+    return redirect(url_for('file_detail',
+                            title=request.form.get('next_title') or title,
+                            **onward))
+
+
+@app.get('/source-image')
+def source_image():
+    """Proxy one source image, so the original can sit next to the crop.
+
+    Restricted to the hosts the bot actually scrapes; anything else is refused
+    rather than fetched.
+    """
+    url = request.args.get('url', '')
+    if not url or not _allowed_source(url):
+        abort(400, 'Not a PID source image.')
+
+    try:
+        upstream = source_session.get(url, timeout=SOURCE_TIMEOUT,
+                                      verify=False, stream=True)
+
+        # PID rotates images out of its object storage, which is the whole
+        # reason the bot archives them. Fall back to the snapshot, as
+        # image_processor.download_image already does on a 404.
+        if upstream.status_code == 404:
+            snapshot = _archived_copy(url, int(time.time() // 120))
+            if not snapshot:
+                raise ValueError('gone from PID, no snapshot')
+            upstream = source_session.get(snapshot, timeout=SOURCE_TIMEOUT,
+                                          verify=False, stream=True)
+
+        upstream.raise_for_status()
+        content_type = upstream.headers.get('Content-Type', 'image/jpeg')
+        if not content_type.startswith('image/'):
+            raise ValueError(f'not an image: {content_type}')
+        body = upstream.raw.read(MAX_SOURCE_BYTES + 1, decode_content=True)
+        if len(body) > MAX_SOURCE_BYTES:
+            raise ValueError('source image too large to preview')
+    except Exception as e:
+        app.logger.info('source image unavailable for %s: %r', url, e)
+        # A placeholder keeps the comparison laid out; a 502 would just leave a
+        # broken-image icon with no explanation of why.
+        return Response(_UNAVAILABLE_SVG, mimetype='image/svg+xml',
+                        headers={'Cache-Control': 'public, max-age=300'})
+
+    return Response(body, mimetype=content_type,
+                    headers={'Cache-Control': 'public, max-age=3600'})
+
+
+# ── Wayback queue ─────────────────────────────────────────────────────────────
+
+@app.get('/partials/wayback')
+def partial_wayback():
+    try:
+        with open(config.WAYBACK_QUEUE_PATH, encoding='utf-8') as f:
+            queue = json.load(f)
+        queue = queue if isinstance(queue, list) else []
+    except (OSError, ValueError):
+        queue = []
+    return render_template('_wayback.html', queue=queue)
+
+
+@app.post('/wayback/retry')
+@requires_maintainer
+def wayback_retry():
+    """Confirm pending archives in the background.
+
+    A full pass can take minutes, which is far longer than a web request should
+    live, so it runs on a thread under a short budget and the page reports the
+    result on the next poll.
+    """
+    threading.Thread(target=wayback.retry_wayback_queue,
+                     kwargs={'budget_seconds': 60}, daemon=True).start()
+    flash('Confirming pending archives in the background.')
+    return redirect(url_for('index'))
+
+
+def secret_source(configured, *env_names):
+    """Where a working secret came from: 'envvars', 'file' or 'missing'.
+
+    Names only, never values: this endpoint is public, and so is the bot log the
+    panel serves beside it. A half-set pair of envvars reads as 'file', because
+    that is the one the loader will actually have fallen back to.
+    """
+    if not configured:
+        return 'missing'
+    return ('envvars' if all(os.environ.get(n, '').strip() for n in env_names)
+            else 'file')
+
+
+@app.get('/healthz')
+def healthz():
+    """Liveness, plus where each secret is coming from.
+
+    After `toolforge envvars create`, this is how you confirm the webservice
+    picked the values up rather than falling back to a stale key file on NFS.
+    """
+    return {
+        'ok': True,
+        'oauth': secret_source(wikiauth.consumer(),
+                               'OAUTH_CONSUMER_KEY', 'OAUTH_CONSUMER_SECRET'),
+        'secret_key': secret_source(_key_material, 'SECRET_KEY'),
+        'owner_set': bool(owner()),
+        'maintainers': len(maintainers()),
+        'tool_data_dir': bool(config.TOOL_DATA_DIR),
+    }

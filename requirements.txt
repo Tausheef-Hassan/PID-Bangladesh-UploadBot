@@ -1,3 +1,4 @@
+# ── Bot pipeline ──────────────────────────────────────────────────────────────
 opencv-python-headless
 numpy
 requests
@@ -10,3 +11,14 @@ google-auth-httplib2
 google-genai
 pywikibot
 urllib3
+pymysql            # Wikidata replica: people's English names (src/name_resolver.py)
+
+# ── Control panel (web: process type) ─────────────────────────────────────────
+flask
+gunicorn
+toolforge-weld     # Wikimedia's own Toolforge API client: certs, retries, errors
+humanize
+croniter
+pyyaml             # panel re-creates the job from toolforge/job.yaml
+# OAuth 2.0 is plain HTTP against meta's rest.php endpoints, so requests is
+# the whole client — mwoauth and requests-oauthlib were only needed for 1.0a.

@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block title %}Name corrections — PID upload bot{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Name corrections</h2>
+  <p class="prose">When the Bengali caption contains the text on the left, the bot
+    puts the English on the right in its place before translating. Use it for
+    names that Wikidata doesn't have, or has spelled differently.</p>
+
+  {% if is_maintainer %}
+    <form method="post" class="corr-add">
+      <input type="hidden" name="action" value="add">
+      <input name="bn" lang="bn" placeholder="Bengali, as in the caption" required aria-label="Bengali">
+      <input name="en" placeholder="Correct English" required aria-label="English">
+      <button type="submit" class="primary">Add correction</button>
+    </form>
+  {% endif %}
+
+  <input type="search" id="corrfilter" placeholder="Search corrections" aria-label="Search corrections" class="corr-filter">
+
+  {% if rows %}
+    <div class="cdx-table"><div class="cdx-table__table-wrapper">
+    <table class="cdx-table__table" id="corrtable">
+      <thead><tr><th>Bengali</th><th>English</th><th>Added by</th>{% if is_maintainer %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            {% if is_maintainer %}
+              <td colspan="4">
+                <form method="post" class="corr-row">
+                  <input type="hidden" name="old_bn" value="{{ r.bn }}">
+                  <input name="bn" value="{{ r.bn }}" lang="bn" aria-label="Bengali">
+                  <input name="en" value="{{ r.en }}" aria-label="English">
+                  <span class="hint">{{ r.user or 'unknown' }}{% if r.date %}, {{ r.date }}{% endif %}</span>
+                  <button type="submit" name="action" value="update" class="small">Save</button>
+                  <button type="submit" name="action" value="delete" class="quiet small"
+                          onclick="return confirm('Delete this correction?')">Delete</button>
+                </form>
+              </td>
+            {% else %}
+              <td lang="bn" class="bn">{{ r.bn }}</td><td>{{ r.en }}</td>
+              <td class="hint">{{ r.user or 'unknown' }}{% if r.date %}, {{ r.date }}{% endif %}</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div></div>
+  {% else %}
+    <p class="prose">No corrections yet. Add one above, or tick "remember" when you fix a name on a file.</p>
+  {% endif %}
+
+  {% if not is_maintainer %}
+    <p class="hint">{% if not controls_enabled %}Editing is off: no maintainers are set up.
+      {% elif not wiki_user %}Sign in with your Wikimedia account to edit these.
+      {% else %}{{ wiki_user }} is not a maintainer of this tool.{% endif %}</p>
+  {% endif %}
+</section>
+<script>
+  // Filters as you type; the table is small enough to live in the page.
+  document.getElementById('corrfilter').addEventListener('input', function () {
+    var q = this.value.trim().toLowerCase();
+    document.querySelectorAll('#corrtable tbody tr').forEach(function (tr) {
+      var text = Array.prototype.map.call(tr.querySelectorAll('input, td'),
+        function (el) { return el.value || el.textContent; }).join(' ').toLowerCase();
+      tr.hidden = q && text.indexOf(q) === -1;
+    });
+  });
+</script>
+{% endblock %}

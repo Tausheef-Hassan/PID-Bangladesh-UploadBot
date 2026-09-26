@@ -1,0 +1,102 @@
+{% extends 'base.html' %}
+{% block title %}Stats — PID upload bot{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="stats-head">
+    <h2>Stats</h2>
+    <nav class="rangepick" aria-label="Period">
+      {% for key, label in ranges %}
+        <a class="{% if view.range == key %}on{% endif %}" {% if view.range == key %}aria-current="true"{% endif %}
+           href="{{ url_for('stats', range=key) }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </div>
+</section>
+
+{% for id, title, block in [('uploads', 'Uploads', view.uploads),
+                            ('failures', 'Failures by cause', view.failures),
+                            ('backlog', 'Review backlog', view.backlog),
+                            ('gemini', 'Gemini calls, free and paid', view.gemini)] %}
+  <section class="card">
+    <h2>{{ title }}</h2>
+    <p class="stats-summary">{{ block.summary }}</p>
+    {% if id == 'uploads' or block.since %}
+      <div class="chartbox"><canvas id="chart-{{ id }}" role="img" aria-label="{{ block.summary }}"></canvas></div>
+      <details class="numbers"><summary>Show numbers</summary>
+        <div class="cdx-table"><div class="cdx-table__table-wrapper"><table class="cdx-table__table">
+          <thead><tr><th>Period</th>
+            {% if id == 'uploads' %}<th>Uploaded</th>
+            {% elif id == 'failures' %}{% for c in block.series %}<th>{{ c }}</th>{% endfor %}
+            {% elif id == 'backlog' %}<th>Check the English</th><th>Needs categories</th>
+            {% else %}<th>Free</th><th>Paid</th><th>Free limit hit</th>{% endif %}</tr></thead>
+          <tbody>
+            {% for label in view.labels %}{% set i = loop.index0 %}
+              <tr><td>{{ label }}</td>
+                {% if id == 'uploads' %}<td>{{ block['values'][i] }}</td>
+                {% elif id == 'failures' %}{% for c, vals in block.series.items() %}<td>{{ vals[i] }}</td>{% endfor %}
+                {% elif id == 'backlog' %}<td>{{ block.review[i] if block.review[i] is not none else '' }}</td><td>{{ block.uncategorised[i] if block.uncategorised[i] is not none else '' }}</td>
+                {% else %}<td>{{ block.free[i] }}</td><td>{{ block.paid[i] }}</td><td>{{ block.free_limit[i] }}</td>{% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table></div></div>
+      </details>
+    {% endif %}
+  </section>
+{% endfor %}
+
+<script type="application/json" id="statsdata">{{ view|tojson }}</script>
+<script src="{{ url_for('static', filename='chartjs/chart.umd.min.js') }}"></script>
+<script>
+  // Draw the four charts from the JSON above. Colours are the dataviz skill's
+  // categorical palette in fixed order (validated: CVD and normal-vision pass;
+  // low surface contrast is why every chart has a legend and a numbers table).
+  // The same series always takes the same colour.
+  (function () {
+    var v = JSON.parse(document.getElementById('statsdata').textContent);
+    var COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
+    var css = getComputedStyle(document.documentElement);
+    var surface = (css.getPropertyValue('--background-color-base') || '#fff').trim();
+    Chart.defaults.font.family = css.getPropertyValue('--font-family-system-sans') || 'sans-serif';
+    Chart.defaults.color = (css.getPropertyValue('--color-subtle') || '#54595d').trim();
+    Chart.defaults.maintainAspectRatio = false;
+    Chart.defaults.animation = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? false : Chart.defaults.animation;
+
+    function bar(label, data, color, extra) {
+      // Thin bars, rounded data end, a 2px surface gap between stacked fills.
+      return Object.assign({label: label, data: data, backgroundColor: color,
+        borderColor: surface, borderWidth: 2, borderRadius: 4, borderSkipped: 'start',
+        maxBarThickness: 28}, extra || {});
+    }
+    function line(label, data, color, extra) {
+      return Object.assign({type: 'line', label: label, data: data, borderColor: color,
+        backgroundColor: color, borderWidth: 2, pointRadius: 4, pointHoverRadius: 6,
+        spanGaps: true, tension: 0}, extra || {});
+    }
+    function draw(id, type, datasets, stacked) {
+      var el = document.getElementById('chart-' + id);
+      if (!el) return;
+      new Chart(el, {type: type, data: {labels: v.labels, datasets: datasets},
+        options: {interaction: {mode: 'index', intersect: false},
+                  plugins: {legend: {display: datasets.length > 1, position: 'bottom'}},
+                  scales: {x: {stacked: !!stacked, grid: {display: false}},
+                           y: {stacked: !!stacked, beginAtZero: true, ticks: {precision: 0},
+                               grid: {color: (css.getPropertyValue('--border-color-subtle') || '#c8ccd1').trim()}}}}});
+    }
+
+    draw('uploads', 'bar', [bar('Uploaded', v.uploads.values, COLORS[0])]);
+    // Fixed cause order: tojson sorts keys, and a colour must follow its cause.
+    var CAUSES = ['download', 'ocr', 'translation', 'title', 'upload', 'other'];
+    draw('failures', 'bar', CAUSES.map(function (c, i) {
+      return bar(c, v.failures.series[c], COLORS[i]);
+    }), true);
+    draw('backlog', 'line', [
+      line('Check the English', v.backlog.review, COLORS[0]),
+      line('Needs categories', v.backlog.uncategorised, COLORS[1])]);
+    draw('gemini', 'bar', [
+      bar('Free', v.gemini.free, COLORS[0], {stack: 'calls'}),
+      bar('Paid', v.gemini.paid, COLORS[1], {stack: 'calls'}),
+      line('Free limit hit', v.gemini.free_limit, COLORS[3])], true);
+  })();
+</script>
+{% endblock %}

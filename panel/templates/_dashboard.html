@@ -1,0 +1,58 @@
+{# Status box: one sentence, then only the buttons that make sense right now. #}
+<div id="dashboard" hx-get="{{ url_for('partial_dashboard') }}"
+     hx-trigger="every 5s" hx-swap="outerHTML">
+
+  <div class="cdx-message cdx-message--block cdx-message--{{ status.tone }} statusbox"
+       role="status" aria-live="polite">
+    <span class="cdx-message__icon"></span>
+    <div class="cdx-message__content">
+      <p class="status-sentence">{{ status.sentence }}</p>
+      {% if api_error %}<p class="status-meta">Reason: {{ api_error }}</p>{% endif %}
+      <p class="status-meta">
+        {% if started_ago %}Last run started {{ started_ago }}{% if duration %}, running for {{ duration }}{% endif %}.
+        {% else %}No run recorded yet.{% endif %}
+        {% if next_in and not paused %}Next run in {{ next_in }}.{% endif %}
+      </p>
+
+      {% if is_maintainer and status.actions %}
+        <div class="status-actions">
+          {% for a in status.actions %}
+            {% if a == 'start' %}
+              <form method="post" action="{{ url_for('start') }}"><button type="submit" class="primary">Start job</button></form>
+            {% elif a == 'run' %}
+              <form method="post" action="{{ url_for('run_now') }}"><button type="submit" class="primary">Run now</button></form>
+            {% elif a == 'pause' %}
+              <form method="post" action="{{ url_for('pause') }}"><button type="submit">Pause schedule</button></form>
+            {% elif a == 'resume' %}
+              <form method="post" action="{{ url_for('resume') }}"><button type="submit" class="primary">Resume schedule</button></form>
+            {% elif a == 'stop' %}
+              <form method="post" action="{{ url_for('stop') }}"
+                    onsubmit="return confirm('Stop the job and end the run in progress?\n\nPhotos already uploaded in this run are only recorded at the end, so they will be processed again next run and skipped as duplicates.\n\nTo quiet the bot without losing work, use Pause schedule instead.')">
+                <button type="submit" class="danger">Stop job</button>
+              </form>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% elif not is_maintainer %}
+        <p class="status-meta">
+          {% if not controls_enabled %}Controls are off: no maintainers are set up.
+          {% elif not wiki_user %}<a href="{{ url_for('oauth_start') }}">Sign in</a> to run the job.
+          {% else %}{{ wiki_user }} is not a maintainer of this tool.{% endif %}
+        </p>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if latest %}
+    <dl class="counts">
+      <div><dt>Uploaded</dt><dd>{{ latest.uploaded }}</dd></div>
+      <div><dt>Already on Commons</dt><dd>{{ latest.duplicates }}</dd></div>
+      <div><dt>Failed</dt><dd class="{% if latest.failed %}is-alert{% endif %}">{{ latest.failed }}</dd></div>
+      <div><dt>Photos seen</dt><dd>{{ latest.scraped }}</dd></div>
+    </dl>
+  {% endif %}
+  {% if latest and latest.error %}
+    <div class="cdx-message cdx-message--block cdx-message--error"><span class="cdx-message__icon"></span>
+      <div class="cdx-message__content">{{ latest.error }}</div></div>
+  {% endif %}
+</div>

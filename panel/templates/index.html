@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block title %}Overview — PID upload bot{% endblock %}
+{% block content %}
+
+  {% include '_dashboard.html' %}
+
+  <section class="card">
+    <h2>Latest uploads</h2>
+    <div hx-get="{{ url_for('partial_gallery') }}" hx-trigger="load" hx-swap="innerHTML">
+      <p class="hint">Loading…</p>
+    </div>
+    <p class="hint"><a href="{{ url_for('uploads') }}">All uploads</a></p>
+  </section>
+
+  <section class="card">
+    {% include '_runs.html' %}
+  </section>
+
+  <details class="card" {% if query or errors_only or request.args.get('log') %}open{% endif %}>
+    <summary><h2 style="display:inline">Technical log</h2>
+      <span class="hint">What the bot printed during its runs</span></summary>
+    {% include '_logtools.html' %}
+    <div id="logwrap" hx-get="{{ log_url }}" {% if live %}hx-trigger="every 3s"{% endif %} hx-swap="innerHTML">
+      {% include '_log.html' %}
+    </div>
+  </details>
+
+{% endblock %}

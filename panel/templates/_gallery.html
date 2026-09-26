@@ -1,0 +1,13 @@
+{% if error %}
+  <p class="prose">{{ error }}</p>
+{% elif not uploads %}
+  <p class="prose">Nothing uploaded yet. Photos appear here after a run uploads them.</p>
+{% else %}
+  <div class="strip">
+    {% for u in uploads %}
+      <a href="{{ url_for('file_detail', title='File:' ~ u.filename) }}" title="{{ u.filename }}">
+        <img src="{{ thumb(u.filename, 240) }}" alt="{{ u.filename }}" loading="lazy">
+      </a>
+    {% endfor %}
+  </div>
+{% endif %}

@@ -1,0 +1,33 @@
+{# Stream picker is links, not submit buttons: two fields named "stream" in one
+   form would fight, and the first in the DOM would always win. #}
+<form class="toolbar filters" method="get" action="{{ url_for('index') }}">
+  <span class="segmented">
+    <a class="seg {% if stream == 'out' %}on{% endif %}"
+       href="{{ url_for('index', stream='out', log=1, q=query or None,
+                        level='errors' if errors_only else None,
+                        live=None if live else '0') }}">Output</a>
+    <a class="seg {% if stream == 'err' %}on{% endif %}"
+       href="{{ url_for('index', stream='err', log=1, q=query or None,
+                        level='errors' if errors_only else None,
+                        live=None if live else '0') }}">Errors</a>
+  </span>
+
+  <input type="hidden" name="stream" value="{{ stream }}">
+  <input type="hidden" name="log" value="1">
+  <input type="search" name="q" value="{{ query }}" placeholder="Filter lines"
+         class="filterbox" aria-label="Filter log lines">
+
+  <label class="check">
+    <input type="checkbox" name="level" value="errors"
+           {% if errors_only %}checked{% endif %}
+           onchange="this.form.submit()"> Only problems
+  </label>
+  <label class="check">
+    <input type="checkbox" name="live" value="0"
+           {% if not live %}checked{% endif %}
+           onchange="this.form.submit()"> Pause updates
+  </label>
+
+  <button type="submit" class="quiet small">Apply</button>
+  <a class="link small" href="{{ url_for('log_download', stream=stream) }}">Download</a>
+</form>

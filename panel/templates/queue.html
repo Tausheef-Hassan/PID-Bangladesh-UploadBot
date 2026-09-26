@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block title %}Queue — PID upload bot{% endblock %}
+{% block content %}
+
+  <section class="card">
+    <h2>Waiting to be archived</h2>
+    <p class="hint">Source pages sent to the Internet Archive but not confirmed saved yet.</p>
+    <div hx-get="{{ url_for('partial_wayback') }}"
+         hx-trigger="load, every 30s" hx-swap="innerHTML">
+      <p class="hint">Loading…</p>
+    </div>
+  </section>
+
+{% endblock %}

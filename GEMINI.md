@@ -19,7 +19,8 @@ The PID Image Processor & Uploader is a Python-based automation tool designed to
 - **Data Handling:**
     - Plain dicts and `json`: run results are written to a JSON log page on Commons.
 - **Deployment:**
-    - **Toolforge jobs:** `toolforge/job.yaml` runs the bot hourly; no web service is involved.
+    - **Toolforge jobs:** `toolforge/job.yaml` runs the bot hourly.
+    - **Toolforge webservice:** `panel/` is a Flask control panel (status, live log, run/pause/stop) served from the `web` Procfile entry, which must stay first in the file. It drives the job through the Toolforge Jobs API via `toolforge-weld` and never imports the pipeline.
 
 ## Architecture
 The application operates as a sequential pipeline:

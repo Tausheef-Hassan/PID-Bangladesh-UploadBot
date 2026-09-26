@@ -24,7 +24,7 @@ import config
 
 def initialize_pywikibot():
     """Initialise Pywikibot and log in to Wikimedia Commons.
-    Returns (site, FilePage) on success, None on failure.
+    Returns the logged-in site on success, None on failure.
     """
     try:
         if not os.path.exists(config.USER_CONFIG_PATH):
@@ -38,7 +38,7 @@ def initialize_pywikibot():
         site.login()
 
         logger.info("Successfully logged in to Wikimedia Commons")
-        return site, FilePage
+        return site
 
     except Exception as e:
         logger.error(f"Failed to initialize Pywikibot: {str(e)}")
@@ -46,7 +46,7 @@ def initialize_pywikibot():
         return None
 
 
-def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description, max_attempts=10):
+def upload_to_commons(site, image, target_filename, img_format, exif_data, description, max_attempts=10):
     """Upload an OpenCV image to Wikimedia Commons.
     Returns (success: bool, error_message: str).
     """
@@ -109,11 +109,6 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
             pass
 
 
-def update_pid_date_data(site, url, date_str, checksum="", unique_id="", filename=""):
-    """Append a single new entry to User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json on Wikimedia Commons."""
-    return batch_update_pid_date_data(site, [(url, date_str, checksum, unique_id, filename)])
-
-
 def batch_update_pid_date_data(site, records):
     """Append multiple entries to User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json on Wikimedia Commons."""
     if not records:
@@ -129,13 +124,8 @@ def batch_update_pid_date_data(site, records):
             return False
 
         try:
-            content = page.text
-            if content.startswith("<syntaxhighlight lang=\"json\">\n"):
-                content = content.replace("<syntaxhighlight lang=\"json\">\n", "")
-            if content.endswith("\n</syntaxhighlight>"):
-                content = content.replace("\n</syntaxhighlight>", "")
-            tab_data = json.loads(content)
-            
+            tab_data = json.loads(config.strip_syntaxhighlight(page.text))
+
             # Migrate Tabular Data format to Normal JSON format
             if isinstance(tab_data, dict) and 'data' in tab_data:
                 new_list = []

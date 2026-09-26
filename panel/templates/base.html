@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}PID upload bot{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='codex/theme-wikimedia-ui.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='codex/codex.style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+<script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-row">
+    <a class="brand" href="{{ url_for('index') }}">PID upload bot</a>
+    <div class="account">
+      {% if wiki_user %}
+        <span class="account-name" {% if is_maintainer %}title="Maintainer: can run the job"{% endif %}>{{ wiki_user }}</span>
+        <form method="post" action="{{ url_for('oauth_logout') }}">
+          <button type="submit" class="quiet small">Sign out</button>
+        </form>
+      {% elif wiki_configured %}
+        <a href="{{ url_for('oauth_start') }}">Sign in with Wikimedia</a>
+      {% else %}
+        <span class="account-name">Read-only</span>
+      {% endif %}
+    </div>
+  </div>
+  <nav class="tabs" aria-label="Pages">
+    {% set here = request.endpoint %}
+    {% for endpoint, label, also in [('index', 'Overview', []),
+                                     ('uploads', 'Uploads', ['file_detail']),
+                                     ('stats', 'Stats', []),
+                                     ('replacements', 'Name corrections', []),
+                                     ('queue', 'Queue', [])]
+           + ([('admin', 'Access', [])] if is_maintainer else []) %}
+      <a class="tab {% if here == endpoint or here in also %}active{% endif %}"
+         {% if here == endpoint or here in also %}aria-current="page"{% endif %}
+         href="{{ url_for(endpoint) }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+</header>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <div class="wrap">
+      {% for m in messages %}
+        <div class="cdx-message cdx-message--block cdx-message--notice notice" role="status">
+          <span class="cdx-message__icon"></span><div class="cdx-message__content">{{ m }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+
+<main class="wrap">
+{% block content %}{% endblock %}
+</main>
+
+</body>
+</html>
