@@ -28,7 +28,6 @@ import credentials
 from src import wayback
 from src.commons_log import log_to_commons
 from src.image_processor import ImageProcessor
-from src.upload_log import import_commons_history
 from src.scraper import scrape_data
 from src.translator import (
     apply_translation_replacements,
@@ -76,12 +75,6 @@ def main():
 
     print("\nChecking and creating categories/modules before scraping...")
     ensure_pid_infrastructure(site)
-
-    print("\nImporting prior Commons upload logs into the local SHA-1 registry...")
-    try:
-        print(f"Imported {import_commons_history(site)} prior upload SHA-1s.")
-    except Exception as e:
-        print(f"WARNING: Could not import prior Commons upload logs: {e}")
 
     # ── 0c. Pre-translation replacement table ─────────────────────────────────
     _translation_replacements = load_translation_replacements()
