@@ -21,6 +21,7 @@ from pywikibot.exceptions import UploadError
 
 from config import logger
 import config
+from src import upload_log
 
 
 def initialize_pywikibot():
@@ -47,7 +48,8 @@ def initialize_pywikibot():
         return None
 
 
-def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description, max_attempts=10):
+def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description,
+                      source_url='', max_attempts=10):
     """Upload an OpenCV image to Wikimedia Commons.
     Returns (success: bool, error_message: str, filename: str), where filename
     is the Commons file holding the image — an existing one for a duplicate.
@@ -69,15 +71,23 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
         else:
             img_pil.save(temp_file.name, **save_kwargs)
 
-        # The upload below ignores warnings, so Commons will not refuse a
-        # byte-identical copy under a new AI-generated filename. Check for one
-        # ourselves; the crop and re-encode are deterministic, so a re-processed
-        # image hashes the same as the copy uploaded before.
         with open(temp_file.name, 'rb') as f:
-            sha1 = hashlib.sha1(f.read()).hexdigest()
-        for existing in site.allimages(sha1=sha1, total=1):
+            image_sha1 = hashlib.sha1(f.read()).hexdigest()
+        prior = upload_log.find(image_sha1)
+        if prior:
+            commons_name = prior.get('commons_filename') or prior.get('filename', '')
+            upload_log.record(image_sha1, 'local_duplicate', target_filename, source_url, commons_name)
+            return False, f'File already exists as {commons_name} (local SHA-1 log)', commons_name
+        try:
+            existing = next(site.allimages(sha1=image_sha1, total=1), None)
+        except Exception as e:
+            upload_log.record(image_sha1, 'check_failed', target_filename, source_url)
+            return False, f'SHA-1 Commons check failed: {e}', target_filename
+        if existing:
+            commons_name = existing.title(with_ns=False)
+            upload_log.record(image_sha1, 'commons_duplicate', target_filename, source_url, commons_name)
             logger.info(f"Identical file already on Commons: {existing.title()}")
-            return False, f'File already exists as {existing.title()} (same SHA-1)', existing.title(with_ns=False)
+            return False, f'File already exists as {existing.title()} (same SHA-1)', commons_name
 
         for attempt in range(max_attempts):
             try:
@@ -85,6 +95,8 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
 
                 if file_page.exists():
                     logger.info(f"File already exists: {target_filename}")
+                    upload_log.record(image_sha1, 'title_conflict', target_filename,
+                                      source_url, target_filename)
                     return False, 'File already exists', target_filename
 
                 logger.info(f"Uploading {target_filename} (attempt {attempt + 1}/{max_attempts})")
@@ -98,6 +110,8 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
 
                 if success:
                     logger.info(f"Successfully uploaded {target_filename}")
+                    upload_log.record(image_sha1, 'uploaded', target_filename,
+                                      source_url, target_filename)
                     return True, '', target_filename
                 else:
                     logger.warning(f"Upload failed — server response for {target_filename}")
@@ -112,6 +126,7 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
                 logger.info("Waiting 10 seconds before retry...")
                 sleep(10)
 
+        upload_log.record(image_sha1, 'failed', target_filename, source_url)
         return False, 'Max attempts reached', target_filename
 
     finally:
