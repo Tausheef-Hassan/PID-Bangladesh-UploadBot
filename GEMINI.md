@@ -34,7 +34,7 @@ The application operates as a sequential pipeline:
     - Translates Bengali text to English using Gemini (Primary) or Google Translate (Fallback).
 4.  **Metadata & Filename Generation:** Uses Gemini to craft a policy-compliant, descriptive filename for Wikimedia Commons.
 5.  **Uploader:** Uploads the processed image to Commons using `pywikibot`, adding standard templates (`{{Information}}`, `{{PD-BDGov-PID}}`, etc.).
-6.  **Post-Process Logging:** Updates a central Wikimedia data module (`Module:PIDDateData`) and logs execution results to the bot's daily JSON log page on Commons (one page per day, to stay under `$wgMaxArticleSize`).
+6.  **Post-Process Logging:** Appends the run's uploads to the monthly upload ledger (`User:PID-Bangladesh-UploadBot/PIDDateData/YYYY-MM.json`) and logs execution results to the bot's daily JSON log page on Commons (one page per day, to stay under `$wgMaxArticleSize`).
 
 ## Building and Running
 
@@ -71,6 +71,6 @@ python main.py
 
 ## Development Conventions
 - **Resilience:** HTTP traffic goes through `config.http_session()`, a `requests.Session` with a `urllib3` `Retry` (exponential backoff with jitter, `429`/`5xx` and transport errors). Idempotent methods only, so Save Page Now `POST`s are never resubmitted automatically.
-- **Duplicate Prevention:** MD5 checksums of raw image bytes are compared against existing Wikimedia records before any AI processing occurs to save on API quota.
+- **Duplicate Prevention:** MD5 checksums of raw image bytes are compared against existing Wikimedia records before any AI processing occurs to save on API quota. The SHA-1 of the final file is checked against Commons right before upload.
 - **IPv4 Enforcement:** Specifically forces IPv4 to avoid common networking issues in certain Kubernetes environments (like Toolforge).
 - **Toolforge Ready:** Runs as a one-shot background job; Toolforge's scheduler owns the hourly cadence.

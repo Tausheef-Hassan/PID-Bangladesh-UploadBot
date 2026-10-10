@@ -56,7 +56,7 @@ pressinform.gov.bd
  ┌──────────────────┐
  │    Uploader      │  Uploads image with {{Information}}, {{PD-BDGov-PID}},
  │                  │  and Bengali/English descriptions via pywikibot.
- │                  │  Batch-updates Module:PIDDateData on Commons.
+ │                  │  Batch-updates the PIDDateData ledger.
  └──────┬───────────┘
         │
         ▼
@@ -184,7 +184,7 @@ pid/
 │   ├── scraper.py               # Web scraping & duplicate detection
 │   ├── image_processor.py       # Download, separator detection, OCR
 │   ├── translator.py            # Bengali → English translation & filename generation
-│   ├── uploader.py              # Pywikibot upload & Module:PIDDateData update
+│   ├── uploader.py              # Pywikibot upload & PIDDateData ledger update
 │   ├── commons_log.py           # Commons bot log page writer
 │   └── wayback.py               # Wayback Machine archiver & retry queue
 │
@@ -301,7 +301,7 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 | `src/scraper.py` | Scrapes PID site; compares MD5 checksums against Commons |
 | `src/image_processor.py` | Downloads, crops, and OCRs images |
 | `src/translator.py` | Translation pipeline and Gemini filename generation |
-| `src/uploader.py` | Pywikibot upload and `Module:PIDDateData` batch update |
+| `src/uploader.py` | Pywikibot upload, SHA-1 duplicate check and PIDDateData ledger batch update |
 | `src/commons_log.py` | Writes run summary to the bot's **daily** JSON log page on Commons |
 | `test_pipeline.py` | Offline self-checks for the two silent-failure modes (log size, Wayback tail) |
 | `src/wayback.py` | Async Wayback archiving; submits without polling, confirms from the queue next run |
@@ -313,9 +313,10 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 ## Development Conventions
 
 - **Resilience:** HTTP calls go through `config.http_session()` — a `requests.Session` carrying a `urllib3` `Retry` (exponential backoff with jitter, `429`/`5xx` retried, transport errors retried). Only idempotent methods are retried, so a Save Page Now `POST` is never resubmitted behind the bot's back. Google API calls use the client library's own `num_retries=config.API_RETRIES`.
-- **Duplicate prevention:** MD5 checksums of raw image bytes are compared against all existing Wikimedia Commons records *before* any AI processing, saving API quota.
-- **Concurrency model:** Up to 5 worker threads process images in parallel. Uploads and `Module:PIDDateData` edits are serialised with a dedicated lock to avoid edit conflicts.
-- **Batch module updates:** Successful upload metadata is queued and written to `Module:PIDDateData` in a single batch edit at the end of each run, minimising API round-trips.
+- **Duplicate prevention:** Source URLs and MD5 checksums of raw image bytes are compared against the upload ledger *before* any AI processing, saving API quota. Just before uploading, the SHA-1 of the final file is looked up on Commons, so a byte-identical copy is never uploaded under a new name even if the ledger is out of date. If the ledger cannot be read, the run aborts rather than treating every image as new.
+- **Upload ledger:** Every upload is recorded in `User:PID-Bangladesh-UploadBot/PIDDateData/YYYY-MM.json`, one page per month so no page approaches the 2 MiB `$wgMaxArticleSize`. The older yearly pages (`PIDDateData/YYYY.json`) are still read but no longer written.
+- **Concurrency model:** Up to 5 worker threads process images in parallel. Uploads and PIDDateData ledger edits are serialised with a dedicated lock to avoid edit conflicts.
+- **Batch module updates:** Successful upload metadata is queued and written to the PIDDateData ledger in a single batch edit at the end of each run, minimising API round-trips.
 - **IPv4 enforcement:** `urllib3`'s `allowed_gai_family` is monkey-patched at import time to force IPv4 and avoid Kubernetes/Toolforge IPv6 connectivity issues.
 - **Bounded log pages:** The Commons log is one JSON page per day. Every run rewrites the whole page, so a month of hourly runs on a single page would cross `$wgMaxArticleSize` and every subsequent save would fail silently. `wikitext_description` is stripped before logging for the same reason — it is the heaviest key and is rebuilt at upload time anyway.
 - **Bounded Wayback tail:** Archive submissions are fire-and-forget (`confirm=False`); polling SPN2 costs up to 90 s per URL and the pool thread is non-daemon, which kept the hourly job alive long after its work was done. Unconfirmed URLs sit in `wayback_pending.json` and the next run's confirmation pass clears them under a `RETRY_BUDGET` wall-clock cap (600 s).

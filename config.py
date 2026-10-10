@@ -83,6 +83,22 @@ HTTP_RETRIES = 10
 # Google API client retries (Drive OCR upload/export/delete)
 API_RETRIES = 5
 
+# ── Upload ledger on Commons ──────────────────────────────────────────────────
+# Every uploaded (or checksum-matched) source URL is recorded under this prefix
+# in the User: namespace, and the scraper skips URLs found there. One page per
+# month (PIDDateData/YYYY-MM.json): a single page per year outgrew the 2 MiB
+# page limit, every save was rejected from then on, and the bot re-uploaded
+# the same images on every hourly run. The legacy PIDDateData/YYYY.json pages
+# are still read, but never written.
+PID_DATE_DATA_PREFIX = "PID-Bangladesh-UploadBot/PIDDateData/"
+MAX_PAGE_BYTES = 2 * 1024 * 1024   # Commons $wgMaxArticleSize
+
+
+def pid_date_data_title(when):
+    """Ledger page that records uploads made at `when` (a datetime)."""
+    return f"User:{PID_DATE_DATA_PREFIX}{when:%Y-%m}.json"
+
+
 # ── Mutable shared state (populated at runtime by credentials module) ─────────
 IA_KEYS = {'access': None, 'secret': None}  # set by credentials.load_ia_keys()
 
