@@ -11,7 +11,7 @@
 #       2c. Translate Bengali  →  English  (translator)
 #       2d. Generate Wikimedia filename  (translator)
 #       2e. Upload to Commons  (uploader)
-#       2f. Update Module:PIDDateData  (uploader)
+#       2f. Record upload in the PIDDateData ledger  (uploader)
 #   3. Log results to Commons  (commons_log)
 
 import concurrent.futures
@@ -90,7 +90,14 @@ def main():
     print("\n" + "=" * 60)
     print("STEP 1: Scraping data from pressinform.gov.bd")
     print("=" * 60)
-    scraped_data, wikimedia_checksums = scrape_data()
+    try:
+        scraped_data, wikimedia_checksums = scrape_data()
+    except Exception as e:
+        # Without the ledger every scraped image looks new; uploading now
+        # would duplicate everything already on Commons.
+        print(f"ERROR: Could not load the PIDDateData upload ledger: {e}")
+        print("Aborting this run instead of re-uploading existing images.")
+        sys.exit(1)
 
     # ── Load Google credentials ───────────────────────────────────────────────
     print("\nLoading Google credentials...")
@@ -294,7 +301,7 @@ def main():
                 # Step 6 — Upload
                 print(f"\nSTEP 6: Uploading to Wikimedia Commons...")
                 with upload_lock:
-                    upload_success, upload_error = upload_to_commons(
+                    upload_success, upload_error, commons_name = upload_to_commons(
                         site, FilePage, result['image'], title, img_format,
                         result.get('exif'), description
                     )
@@ -303,7 +310,7 @@ def main():
                         print(
                             f"Row {idx + 1}: File already exists. Updating PIDDateData to prevent future retries...")
                         pid_updated = update_pid_date_data(
-                            site, image_url, date_str, img_checksum, unique_id, title)
+                            site, image_url, date_str, img_checksum, unique_id, commons_name)
                     else:
                         pid_updated = False
 
@@ -348,7 +355,14 @@ def main():
         if successful_pid_updates:
             print(
                 f"\nBatch updating {len(successful_pid_updates)} records to PIDDateData...")
-            batch_update_pid_date_data(site, successful_pid_updates)
+            if not batch_update_pid_date_data(site, successful_pid_updates):
+                # These uploads are now unrecorded: the next run will scrape
+                # them again and only the SHA-1 check stops a re-upload.
+                print(f"ERROR: PIDDateData batch update FAILED — "
+                      f"{len(successful_pid_updates)} uploads are not recorded")
+                for row in rows:
+                    if row["pid_date_data_status"] == "Success (queued)":
+                        row["pid_date_data_status"] = "Failed (batch update)"
 
         print("\nLogging results to Wikimedia Commons...")
         if log_to_commons(site, rows, success_count, failed_count, total_rows):

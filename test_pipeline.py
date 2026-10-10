@@ -1,7 +1,9 @@
 # test_pipeline.py
-# Offline self-checks for the two failure modes that take the bot down silently:
+# Offline self-checks for the failure modes that take the bot down silently:
 #   1. the Commons log page outgrowing $wgMaxArticleSize
 #   2. the Wayback tail holding the hourly job open long past its work
+#   3. the PIDDateData ledger outgrowing $wgMaxArticleSize, after which every
+#      hourly run re-uploads the same images under new filenames
 #
 # Run with:  python test_pipeline.py
 
@@ -48,6 +50,10 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class FakeSession:
@@ -209,6 +215,143 @@ def test_retry_budget_leaves_remainder_queued():
 
         left = json.load(open(config.WAYBACK_QUEUE_PATH, encoding="utf-8"))
         assert left == urls, f"a spent budget must requeue everything, got {left}"
+
+
+# ── 3. Upload ledger (PIDDateData) ────────────────────────────────────────────
+# The yearly ledger page outgrew $wgMaxArticleSize, every save was rejected,
+# and each hourly run re-uploaded the same images under new AI filenames.
+
+def _import_uploader():
+    os.environ.setdefault("PYWIKIBOT_NO_USER_CONFIG", "1")
+    from src import uploader
+    return uploader
+
+
+class LedgerPage(FakePage):
+    """A ledger page that already holds `existing` records."""
+    existing = None
+
+    def __init__(self, site, title):
+        super().__init__(site, title)
+        if LedgerPage.existing is not None:
+            self.text = json.dumps(LedgerPage.existing)
+
+    def exists(self):
+        return LedgerPage.existing is not None
+
+
+def _ledger_record(i):
+    return ("https://objectstorage.example/o/office-pressinform/2026/9/%032d.jpg" % i,
+            "2026-10-08 18:31:00", "%032x" % i, "", "Some descriptive filename, 2026-10-08.jpg")
+
+
+def test_ledger_is_monthly():
+    from datetime import datetime
+    title = config.pid_date_data_title(datetime(2026, 10, 10, 13, 0))
+    assert title == "User:PID-Bangladesh-UploadBot/PIDDateData/2026-10.json", title
+
+
+def test_ledger_creates_and_appends_to_month_page():
+    uploader = _import_uploader()
+
+    class Fake:
+        Page = LedgerPage
+    uploader.pywikibot = Fake
+    FakePage.instances.clear()
+    LedgerPage.existing = None
+
+    assert uploader.batch_update_pid_date_data(object(), [_ledger_record(1), _ledger_record(2)])
+    page = FakePage.instances[-1]
+    assert page.saved and page.title_str.endswith(".json")
+    assert [r["checksum"] for r in json.loads(page.text)] == ["%032x" % 1, "%032x" % 2]
+
+
+def test_ledger_refuses_oversized_save():
+    uploader = _import_uploader()
+
+    class Fake:
+        Page = LedgerPage
+    uploader.pywikibot = Fake
+    FakePage.instances.clear()
+    # Roughly the 2026.json page as it stood: 301 bytes under the limit.
+    record = dict(zip(("url", "date", "checksum", "unique_id", "filename"), _ledger_record(0)))
+    per_record = len(json.dumps(record, separators=(",", ":"))) + 1
+    LedgerPage.existing = [record] * (config.MAX_PAGE_BYTES // per_record)
+
+    ok = uploader.batch_update_pid_date_data(object(), [_ledger_record(1)])
+    assert ok is False, "an oversized ledger save must report failure"
+    assert not FakePage.instances[-1].saved
+    LedgerPage.existing = None
+
+
+class LedgerSession:
+    """Serves allpages listings and action=raw page bodies like Commons."""
+
+    def __init__(self, pages, fail_raw=False):
+        self.pages = pages
+        self.fail_raw = fail_raw
+
+    def get(self, url, params=None, **kw):
+        if params.get("list") == "allpages":
+            prefix = "User:" + params["apprefix"]
+            titles = [{"title": t} for t in self.pages if t.startswith(prefix)]
+            return FakeResponse({"query": {"allpages": titles}})
+        if self.fail_raw:
+            return FakeResponse({}, status_code=503)
+        return FakeResponse(self.pages[params["title"]])
+
+
+def _ledger_entries(*names):
+    return [{"url": f"https://pressinform.gov.bd/{n}.jpg", "checksum": n} for n in names]
+
+
+def test_scraper_reads_yearly_and_monthly_ledgers():
+    from src import scraper
+    base = "User:" + config.PID_DATE_DATA_PREFIX
+    scraper.session = LedgerSession({
+        base + "2026.json": _ledger_entries("a", "b"),
+        base + "2026-10.json": _ledger_entries("c"),
+        base + "2025.json": _ledger_entries("old"),
+    })
+    urls, checksums = scraper.fetch_wikimedia_data(2026)
+    assert checksums == {"a", "b", "c"}, checksums
+    assert scraper.normalize_url("https://pressinform.gov.bd/c.jpg") in urls
+
+
+def test_scraper_raises_when_ledger_unreadable():
+    """An unreadable ledger must stop the run, not look like 'nothing uploaded'."""
+    from src import scraper
+    scraper.session = LedgerSession(
+        {"User:" + config.PID_DATE_DATA_PREFIX + "2026.json": []}, fail_raw=True)
+    try:
+        scraper.fetch_wikimedia_data(2026)
+    except Exception:
+        return
+    raise AssertionError("fetch_wikimedia_data swallowed a failed ledger read")
+
+
+def test_upload_skips_byte_identical_file():
+    import numpy as np
+    uploader = _import_uploader()
+
+    class Existing:
+        def title(self, with_ns=True):
+            return ("File:" if with_ns else "") + "Earlier upload.jpg"
+
+    class Site:
+        def allimages(self, sha1=None, total=None):
+            assert len(sha1) == 40
+            return iter([Existing()])
+
+    class NeverUpload:
+        def __init__(self, *a):
+            raise AssertionError("uploaded a file Commons already has")
+
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    ok, error, name = uploader.upload_to_commons(
+        Site(), NeverUpload, image, "New AI title.jpg", "jpg", None, "desc")
+    assert ok is False and "already exists" in error.lower(), error
+    assert name == "Earlier upload.jpg", name
 
 
 if __name__ == "__main__":

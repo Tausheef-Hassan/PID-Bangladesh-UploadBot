@@ -5,6 +5,7 @@
 #   - Module:PIDDateData update
 #   - Pre-upload category / module infrastructure check
 
+import hashlib
 import json
 import os
 import tempfile
@@ -48,7 +49,8 @@ def initialize_pywikibot():
 
 def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_data, description, max_attempts=10):
     """Upload an OpenCV image to Wikimedia Commons.
-    Returns (success: bool, error_message: str).
+    Returns (success: bool, error_message: str, filename: str), where filename
+    is the Commons file holding the image — an existing one for a duplicate.
     """
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{img_format}')
     try:
@@ -67,13 +69,23 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
         else:
             img_pil.save(temp_file.name, **save_kwargs)
 
+        # The upload below ignores warnings, so Commons will not refuse a
+        # byte-identical copy under a new AI-generated filename. Check for one
+        # ourselves; the crop and re-encode are deterministic, so a re-processed
+        # image hashes the same as the copy uploaded before.
+        with open(temp_file.name, 'rb') as f:
+            sha1 = hashlib.sha1(f.read()).hexdigest()
+        for existing in site.allimages(sha1=sha1, total=1):
+            logger.info(f"Identical file already on Commons: {existing.title()}")
+            return False, f'File already exists as {existing.title()} (same SHA-1)', existing.title(with_ns=False)
+
         for attempt in range(max_attempts):
             try:
                 file_page = FilePage(site, f'File:{target_filename}')
 
                 if file_page.exists():
                     logger.info(f"File already exists: {target_filename}")
-                    return False, 'File already exists'
+                    return False, 'File already exists', target_filename
 
                 logger.info(f"Uploading {target_filename} (attempt {attempt + 1}/{max_attempts})")
 
@@ -86,7 +98,7 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
 
                 if success:
                     logger.info(f"Successfully uploaded {target_filename}")
-                    return True, ''
+                    return True, '', target_filename
                 else:
                     logger.warning(f"Upload failed — server response for {target_filename}")
 
@@ -100,7 +112,7 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
                 logger.info("Waiting 10 seconds before retry...")
                 sleep(10)
 
-        return False, 'Max attempts reached'
+        return False, 'Max attempts reached', target_filename
 
     finally:
         try:
@@ -110,26 +122,21 @@ def upload_to_commons(site, FilePage, image, target_filename, img_format, exif_d
 
 
 def update_pid_date_data(site, url, date_str, checksum="", unique_id="", filename=""):
-    """Append a single new entry to User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json on Wikimedia Commons."""
+    """Append a single new entry to this month's PIDDateData ledger page on Wikimedia Commons."""
     return batch_update_pid_date_data(site, [(url, date_str, checksum, unique_id, filename)])
 
 
 def batch_update_pid_date_data(site, records):
-    """Append multiple entries to User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json on Wikimedia Commons."""
+    """Append multiple entries to this month's PIDDateData ledger page on Wikimedia Commons."""
     if not records:
         return True
 
     try:
-        current_year = datetime.now().year
-        page_title = f"User:PID-Bangladesh-UploadBot/PIDDateData/{current_year}.json"
+        page_title = config.pid_date_data_title(datetime.now())
         page = pywikibot.Page(site, page_title)
 
-        if not page.exists():
-            logger.error(f"Page does not exist: {page_title}")
-            return False
-
         try:
-            content = page.text
+            content = page.text if page.exists() else '[]'
             if content.startswith("<syntaxhighlight lang=\"json\">\n"):
                 content = content.replace("<syntaxhighlight lang=\"json\">\n", "")
             if content.endswith("\n</syntaxhighlight>"):
@@ -164,6 +171,10 @@ def batch_update_pid_date_data(site, records):
             })
 
         json_str = json.dumps(tab_data, ensure_ascii=False, separators=(',', ':'))
+        if len(json_str.encode('utf-8')) >= config.MAX_PAGE_BYTES:
+            logger.error(f"{page_title} would exceed the {config.MAX_PAGE_BYTES}-byte page limit; "
+                         f"{len(records)} records NOT saved")
+            return False
         page.text = json_str
         page.save(summary=f"added {len(records)} images", bot=True)
 
@@ -177,7 +188,7 @@ def batch_update_pid_date_data(site, records):
 
 
 def ensure_pid_infrastructure(site):
-    """Ensure all required categories and User:PID-Bangladesh-UploadBot/PIDDateData/{year}.json exist for today."""
+    """Ensure all required categories and this month's PIDDateData ledger page exist for today."""
     now = datetime.now()
     year = now.year
     month = now.month
@@ -242,13 +253,13 @@ def ensure_pid_infrastructure(site):
         except Exception as e:
             logger.error(f"Error creating {title}: {e}")
 
-    # Ensure PIDDateData/{year}.json exists
-    tab_title = f"User:PID-Bangladesh-UploadBot/PIDDateData/{year}.json"
+    # Ensure this month's PIDDateData/{YYYY-MM}.json exists
+    tab_title = config.pid_date_data_title(now)
     try:
         tab_page = pywikibot.Page(site, tab_title)
         if not tab_page.exists():
             tab_page.text = '[]'
-            tab_page.save(summary="Creating Data schema for new year", bot=True)
+            tab_page.save(summary="Creating upload ledger for new month", bot=True)
             logger.info(f"Created: {tab_title}")
         else:
             logger.info(f"Already exists: {tab_title}")

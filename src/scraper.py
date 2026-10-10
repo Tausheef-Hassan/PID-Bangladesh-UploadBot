@@ -39,89 +39,81 @@ def generate_unique_id(img_url, date_str, counter):
     return unique_id
 
 
-def fetch_wikimedia_data(year):
-    """Fetch data from Wikimedia User:PID-Bangladesh-UploadBot/PIDDateData/{year}.json"""
-    headers = {
-        'User-Agent': 'PressInformScraper/1.0 Python/requests'
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+COMMONS_HEADERS = {
+    'User-Agent': 'PressInformScraper/1.0 Python/requests'
+}
+
+
+def list_pid_date_data_pages(year):
+    """Titles of every ledger page for `year`: the legacy yearly page
+    (PIDDateData/{year}.json) and the monthly pages (PIDDateData/{year}-MM.json)."""
+    params = {
+        'action': 'query',
+        'list': 'allpages',
+        'apnamespace': 2,
+        'apprefix': f"{config.PID_DATE_DATA_PREFIX}{year}",
+        'aplimit': 'max',
+        'format': 'json',
+        'formatversion': 2,
     }
+    titles = []
+    while True:
+        response = session.get(COMMONS_API, params=params, headers=COMMONS_HEADERS, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        titles += [p['title'] for p in data['query']['allpages'] if p['title'].endswith('.json')]
+        if 'continue' not in data:
+            return titles
+        params.update(data['continue'])
 
-    # Use the bot's user subpage instead of the Data namespace to avoid Tabular Data strictness
-    title = f"User:PID-Bangladesh-UploadBot/PIDDateData/{year}.json"
-    
-    urls_to_try = [
-        f"https://commons.wikimedia.org/w/index.php?title={title}&action=raw",
-        f"https://commons.wikimedia.org/w/api.php?action=query&titles={title}&prop=revisions&rvprop=content&format=json&formatversion=2"
-    ]
 
-    for url in urls_to_try:
-        try:
-            print(f"Trying URL: {url}")
-            response = session.get(url, headers=headers, timeout=10)
-            print(f"Status code: {response.status_code}")
+def fetch_pid_date_data_page(title):
+    """Fetch one ledger page and return its records as a list of dicts.
+    Raises on any network or parse error."""
+    response = session.get(
+        "https://commons.wikimedia.org/w/index.php",
+        params={'title': title, 'action': 'raw'},
+        headers=COMMONS_HEADERS, timeout=60)
+    response.raise_for_status()
+    content = response.text
 
-            if response.status_code == 200:
-                content = response.text
+    # Strip syntaxhighlight wrappers if they exist
+    if content.startswith("<syntaxhighlight lang=\"json\">\n"):
+        content = content.replace("<syntaxhighlight lang=\"json\">\n", "")
+    if content.endswith("\n</syntaxhighlight>"):
+        content = content.replace("\n</syntaxhighlight>", "")
 
-                if 'api.php' in url:
-                    api_data = json.loads(content)
-                    pages = api_data.get('query', {}).get('pages', [])
-                    if pages and len(pages) > 0:
-                        page_data = pages[0]
-                        if 'revisions' in page_data and len(page_data['revisions']) > 0:
-                            content = page_data['revisions'][0]['content']
-                        else:
-                            continue
-                    else:
-                        continue
+    tab_data = json.loads(content)
+    if isinstance(tab_data, dict) and 'data' in tab_data:
+        # Old Tabular JSON format
+        return [{"url": row[0], "checksum": row[2] if len(row) > 2 else ""}
+                for row in tab_data['data'] if len(row) > 0 and row[0]]
+    if isinstance(tab_data, list):
+        # New Normal JSON format
+        return tab_data
+    raise ValueError(f"Unexpected JSON structure in {title}")
 
-                if len(content) < 10:
-                    continue
 
-                urls = set()
-                checksums = set()
-                
-                # Strip syntaxhighlight wrappers if they exist
-                if content.startswith("<syntaxhighlight lang=\"json\">\n"):
-                    content = content.replace("<syntaxhighlight lang=\"json\">\n", "")
-                if content.endswith("\n</syntaxhighlight>"):
-                    content = content.replace("\n</syntaxhighlight>", "")
-                
-                # Parse JSON
-                try:
-                    tab_data = json.loads(content)
-                    urls_list = []
-                    
-                    if isinstance(tab_data, dict) and 'data' in tab_data:
-                        # Old Tabular JSON format
-                        rows = tab_data['data']
-                        for row in rows:
-                            if len(row) > 0 and row[0]:
-                                urls_list.append({"url": row[0], "checksum": row[2] if len(row) > 2 else ""})
-                    elif isinstance(tab_data, list):
-                        # New Normal JSON format
-                        urls_list = tab_data
-                    
-                    for item in urls_list:
-                        url = item.get("url")
-                        checksum = item.get("checksum")
-                        if url:
-                            normalized = normalize_url(url)
-                            urls.add(normalized)
-                        if checksum:
-                            checksums.add(checksum)
-                            
-                    print(f"Found {len(urls)} URLs and {len(checksums)} checksums in {year} Data")
-                    if len(urls) > 0:
-                        return urls, checksums
-                except json.JSONDecodeError:
-                    print("Failed to parse JSON data.")
-                    
-        except Exception as e:
-            print(f"Error with URL {url}: {e}")
-            continue
+def fetch_wikimedia_data(year):
+    """Fetch every URL and checksum the bot has recorded for `year`.
 
-    print(f"Could not fetch Wikimedia data for {year}")
-    return set(), set()
+    Raises if any ledger page cannot be read. Treating a failed read as
+    "nothing uploaded yet" makes the bot re-upload everything it finds,
+    so the caller must abort the run instead.
+    """
+    urls = set()
+    checksums = set()
+    for title in list_pid_date_data_pages(year):
+        print(f"Fetching {title}")
+        for item in fetch_pid_date_data_page(title):
+            if item.get("url"):
+                urls.add(normalize_url(item["url"]))
+            if item.get("checksum"):
+                checksums.add(item["checksum"])
+
+    print(f"Found {len(urls)} URLs and {len(checksums)} checksums in {year} Data")
+    return urls, checksums
 
 
 def convert_bengali_date_to_english(bengali_date_text):
