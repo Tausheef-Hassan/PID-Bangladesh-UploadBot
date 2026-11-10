@@ -188,7 +188,6 @@ pid/
 │   ├── commons_log.py           # Commons bot log page writer
 │   └── wayback.py               # Wayback Machine archiver & retry queue
 │
-├── data/                        # translation_replacements.tsv and similar data files
 ├── output/                      # Local run artifacts
 ├── toolforge/                   # Toolforge-specific deployment configs
 │
@@ -305,7 +304,7 @@ The bot is designed for [Wikimedia Toolforge](https://wikitech.wikimedia.org/wik
 | `src/commons_log.py` | Writes run summary to the bot's **daily** JSON log page on Commons |
 | `test_pipeline.py` | Offline self-checks for the two silent-failure modes (log size, Wayback tail) |
 | `src/wayback.py` | Async Wayback archiving; submits without polling, confirms from the queue next run |
-| `data/translation_replacements.tsv` | Manual OCR correction rules applied before translation |
+| `translation_replacements.tsv` | Manual OCR correction rules applied before translation; read from `$TOOL_DATA_DIR` (edited by the tool's replacements webservice), else next to `main.py` |
 | `wayback_pending.json` | Persistent queue for failed Wayback Machine submissions |
 
 ---

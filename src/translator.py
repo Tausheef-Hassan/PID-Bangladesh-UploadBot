@@ -14,14 +14,17 @@ from config import logger
 # ── Pre-translation replacement table ────────────────────────────────────────
 
 def load_translation_replacements():
-    """Load find/replace pairs from translation_replacements.tsv next to main.py.
+    """Load find/replace pairs from translation_replacements.tsv, taking the
+    first of config.TRANSLATION_REPLACEMENTS_PATHS that exists ($TOOL_DATA_DIR
+    on Toolforge, then next to main.py).
     Format: BengaliText|||EnglishReplacement  (one per line, # for comments)
     """
     SEPARATOR = '|||'
     replacements = []
-    tsv_path = os.path.join(config.SCRIPT_DIR, 'translation_replacements.tsv')
-    if not os.path.exists(tsv_path):
-        logger.info("No translation_replacements.tsv found, skipping pre-translation replacements")
+    tsv_path = next((p for p in config.TRANSLATION_REPLACEMENTS_PATHS if os.path.exists(p)), None)
+    if tsv_path is None:
+        logger.info("No translation_replacements.tsv found in %s, skipping pre-translation replacements",
+                    ", ".join(config.TRANSLATION_REPLACEMENTS_PATHS))
         return replacements
     try:
         with open(tsv_path, 'r', encoding='utf-8') as f:

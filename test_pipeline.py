@@ -354,8 +354,34 @@ def test_upload_skips_byte_identical_file():
     assert name == "Earlier upload.jpg", name
 
 
+def test_replacements_prefer_tool_data_dir():
+    """The webservice edits $TOOL_DATA_DIR/translation_replacements.tsv; the
+    bot must read that copy, and fall back to the one next to main.py."""
+    from src import translator
+
+    saved = config.TRANSLATION_REPLACEMENTS_PATHS
+    with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as app:
+        data_tsv = os.path.join(data, "translation_replacements.tsv")
+        app_tsv = os.path.join(app, "translation_replacements.tsv")
+        with open(app_tsv, "w", encoding="utf-8") as f:
+            f.write("# comment\nআবুল|||Abul\n")
+        config.TRANSLATION_REPLACEMENTS_PATHS = [data_tsv, app_tsv]
+        try:
+            assert translator.load_translation_replacements() == [("আবুল", "Abul")]
+
+            with open(data_tsv, "w", encoding="utf-8") as f:
+                f.write("তারেক|||Tarique\nno separator here\n\n")
+            assert translator.load_translation_replacements() == [("তারেক", "Tarique")]
+
+            os.remove(data_tsv)
+            os.remove(app_tsv)
+            assert translator.load_translation_replacements() == []
+        finally:
+            config.TRANSLATION_REPLACEMENTS_PATHS = saved
+
+
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    tests =[v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()
         print(f"  ok  {t.__name__}")

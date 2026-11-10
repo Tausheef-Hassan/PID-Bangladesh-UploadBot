@@ -73,6 +73,14 @@ IA_KEY_PATH = os.path.join(CREDS_DIR, 'ia.key')              # Internet Archive 
 WAYBACK_QUEUE_PATH = os.path.join(CREDS_DIR, 'wayback_pending.json')  # Persistent retry queue
 UPLOAD_LOG_PATH = os.path.join(CREDS_DIR, 'upload_log.jsonl')  # Persistent SHA-1 registry
 
+# Pre-translation OCR corrections. On Toolforge the tool's "PID Translation
+# Replacements" webservice edits $TOOL_DATA_DIR/translation_replacements.tsv,
+# so that copy wins; a file next to main.py is the local-dev fallback.
+TRANSLATION_REPLACEMENTS_PATHS = [
+    os.path.join(CREDS_DIR, 'translation_replacements.tsv'),
+    os.path.join(SCRIPT_DIR, 'translation_replacements.tsv'),
+]
+
 # AI call retries (translator's own backoff ladder)
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
