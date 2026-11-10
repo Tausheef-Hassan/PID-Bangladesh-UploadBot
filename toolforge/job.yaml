@@ -11,7 +11,7 @@
 ---
 - name: pid-bot
   command: run-bot
-  image: tool-pid-bangladesh-uploadbot2/tool-pid-bangladesh-uploadbot2:latest
+  image: tool-pid-bangladesh-uploadbot/tool-pid-bangladesh-uploadbot:latest
   schedule: "@hourly"
   # continuous: true
   mem: 2Gi
