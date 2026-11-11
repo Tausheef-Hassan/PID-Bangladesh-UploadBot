@@ -176,6 +176,20 @@ def batch_update_pid_date_data(site, records):
             logger.error(f"Failed to parse JSON in {page_title}")
             return False
 
+        # A URL already on the page is never appended again: duplicate rows
+        # only bloat the page toward its size limit and record nothing new.
+        recorded = {row.get("url") for row in tab_data if isinstance(row, dict)}
+        new_records = []
+        for record in records:
+            if record[0] in recorded:
+                logger.info(f"Already in {page_title}, not appending again: {record[0]}")
+                continue
+            recorded.add(record[0])
+            new_records.append(record)
+        if not new_records:
+            return True
+        records = new_records
+
         for url, date_str, checksum, unique_id, filename in records:
             tab_data.append({
                 "url": url,

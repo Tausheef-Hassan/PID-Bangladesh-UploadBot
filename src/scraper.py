@@ -69,14 +69,29 @@ def list_pid_date_data_pages(year):
 
 
 def fetch_pid_date_data_page(title):
-    """Fetch one ledger page and return its records as a list of dicts.
-    Raises on any network or parse error."""
+    """Fetch the latest revision of one ledger page and return its records as
+    a list of dicts. Raises on any network, missing-page or parse error.
+
+    Reads through the API, not index.php?action=raw: the CDN can answer
+    action=raw from cache, and a stale ledger makes the bot treat photos it
+    has just recorded as new, re-process them and append them again."""
     response = session.get(
-        "https://commons.wikimedia.org/w/index.php",
-        params={'title': title, 'action': 'raw'},
+        COMMONS_API,
+        params={
+            'action': 'query',
+            'prop': 'revisions',
+            'titles': title,
+            'rvprop': 'content',
+            'rvslots': 'main',
+            'format': 'json',
+            'formatversion': 2,
+        },
         headers=COMMONS_HEADERS, timeout=60)
     response.raise_for_status()
-    content = response.text
+    page = response.json()['query']['pages'][0]
+    if page.get('missing') or not page.get('revisions'):
+        raise ValueError(f"Ledger page {title} has no readable revision")
+    content = page['revisions'][0]['slots']['main']['content']
 
     # Strip syntaxhighlight wrappers if they exist
     if content.startswith("<syntaxhighlight lang=\"json\">\n"):

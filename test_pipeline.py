@@ -266,6 +266,32 @@ def test_ledger_creates_and_appends_to_month_page():
     assert [r["checksum"] for r in json.loads(page.text)] == ["%032x" % 1, "%032x" % 2]
 
 
+def test_ledger_never_appends_a_recorded_url_again():
+    """Overlapping or stale-read runs re-recorded the same photo up to 17 times
+    on PIDDateData/2026-11.json; a URL already on the page must be skipped."""
+    uploader = _import_uploader()
+
+    class Fake:
+        Page = LedgerPage
+    uploader.pywikibot = Fake
+    FakePage.instances.clear()
+    first = dict(zip(("url", "date", "checksum", "unique_id", "filename"), _ledger_record(1)))
+    LedgerPage.existing = [first]
+    try:
+        # Only already-recorded URLs: report success without editing the page.
+        assert uploader.batch_update_pid_date_data(object(), [_ledger_record(1)])
+        assert not FakePage.instances[-1].saved
+
+        # Mixed batch (with a repeat inside it): only the new URL is appended, once.
+        assert uploader.batch_update_pid_date_data(
+            object(), [_ledger_record(1), _ledger_record(2), _ledger_record(2)])
+        page = FakePage.instances[-1]
+        assert page.saved
+        assert [r["checksum"] for r in json.loads(page.text)] == ["%032x" % 1, "%032x" % 2]
+    finally:
+        LedgerPage.existing = None
+
+
 def test_ledger_refuses_oversized_save():
     uploader = _import_uploader()
 
@@ -285,20 +311,28 @@ def test_ledger_refuses_oversized_save():
 
 
 class LedgerSession:
-    """Serves allpages listings and action=raw page bodies like Commons."""
+    """Serves allpages listings and latest-revision page bodies like the
+    Commons API. index.php?action=raw is refused: the CDN can serve it stale."""
 
     def __init__(self, pages, fail_raw=False):
         self.pages = pages
         self.fail_raw = fail_raw
 
     def get(self, url, params=None, **kw):
+        assert params.get("action") != "raw", "ledger read through cacheable action=raw"
         if params.get("list") == "allpages":
             prefix = "User:" + params["apprefix"]
             titles = [{"title": t} for t in self.pages if t.startswith(prefix)]
             return FakeResponse({"query": {"allpages": titles}})
         if self.fail_raw:
             return FakeResponse({}, status_code=503)
-        return FakeResponse(self.pages[params["title"]])
+        assert params.get("prop") == "revisions", params
+        title = params["titles"]
+        if title not in self.pages:
+            return FakeResponse({"query": {"pages": [{"title": title, "missing": True}]}})
+        content = json.dumps(self.pages[title])
+        return FakeResponse({"query": {"pages": [{"title": title, "revisions": [
+            {"slots": {"main": {"content": content}}}]}]}})
 
 
 def _ledger_entries(*names):
@@ -328,6 +362,25 @@ def test_scraper_raises_when_ledger_unreadable():
     except Exception:
         return
     raise AssertionError("fetch_wikimedia_data swallowed a failed ledger read")
+
+
+def test_scraper_raises_when_ledger_page_missing():
+    """A listed page that the API reports missing must also stop the run."""
+    from src import scraper
+    base = "User:" + config.PID_DATE_DATA_PREFIX
+
+    class Vanishing(LedgerSession):
+        def get(self, url, params=None, **kw):
+            if params.get("list") == "allpages":
+                return FakeResponse({"query": {"allpages": [{"title": base + "2026-11.json"}]}})
+            return super().get(url, params, **kw)
+
+    scraper.session = Vanishing({})
+    try:
+        scraper.fetch_wikimedia_data(2026)
+    except Exception:
+        return
+    raise AssertionError("fetch_wikimedia_data treated a missing ledger page as empty")
 
 
 def test_upload_skips_byte_identical_file():
