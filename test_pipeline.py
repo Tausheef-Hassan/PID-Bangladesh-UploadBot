@@ -407,6 +407,33 @@ def test_upload_skips_byte_identical_file():
     assert name == "Earlier upload.jpg", name
 
 
+def test_upload_log_lists_urls_already_on_commons():
+    """URLs the local log says are on Commons are skipped before OCR, so a
+    failed ledger save never sends the same photo through paid translation."""
+    from src import upload_log
+
+    saved = config.UPLOAD_LOG_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        config.UPLOAD_LOG_PATH = os.path.join(tmp, "upload_log.jsonl")
+        try:
+            assert upload_log.uploaded_urls() == {}
+            upload_log.record("a" * 40, "uploaded", "A.jpg", "https://pid/a.jpg", "A.jpg")
+            upload_log.record("b" * 40, "commons_duplicate", "B new.jpg", "https://pid/b.jpg", "B.jpg")
+            upload_log.record("c" * 40, "local_duplicate", "C new.jpg", "https://pid/c.jpg", "C.jpg")
+            upload_log.record("d" * 40, "title_conflict", "D.jpg", "https://pid/d.jpg", "D.jpg")
+            upload_log.record("e" * 40, "failed", "E.jpg", "https://pid/e.jpg")
+            upload_log.record("f" * 40, "imported", "F.jpg", "https://pid/f.jpg", "F.jpg")
+            upload_log.record("", "commons_import_complete", "", "", "1")
+            assert upload_log.uploaded_urls() == {
+                "https://pid/a.jpg": "A.jpg",
+                "https://pid/b.jpg": "B.jpg",
+                "https://pid/c.jpg": "C.jpg",
+                "https://pid/f.jpg": "F.jpg",
+            }
+        finally:
+            config.UPLOAD_LOG_PATH = saved
+
+
 def test_replacements_prefer_tool_data_dir():
     """The webservice edits $TOOL_DATA_DIR/translation_replacements.tsv; the
     bot must read that copy, and fall back to the one next to main.py."""

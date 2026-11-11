@@ -25,7 +25,7 @@ from google.cloud import translate_v2 as translate
 # ── Project modules ───────────────────────────────────────────────────────────
 import config
 import credentials
-from src import wayback
+from src import upload_log, wayback
 from src.commons_log import log_to_commons
 from src.image_processor import ImageProcessor
 from src.scraper import scrape_data
@@ -157,6 +157,11 @@ def main():
         total_rows = len(rows)
         print(f"Total rows to process: {total_rows}")
 
+        # Photos the local log says are on Commons but the ledger missed (for
+        # example when a ledger save failed after the upload) are skipped
+        # before download, so they never reach OCR or paid translation.
+        logged_urls = upload_log.uploaded_urls()
+
         success_count = 0
         failed_count = 0
 
@@ -194,6 +199,23 @@ def main():
                 if not image_url or image_url == 'nan':
                     print(f"Row {idx + 1}: No URL, skipping")
                     row["ocr_status"] = "No URL"
+                    return
+
+                if image_url in logged_urls:
+                    commons_name = logged_urls[image_url]
+                    print(f"Row {idx + 1}: Already uploaded as {commons_name} (local upload log) — "
+                          f"registering URL in ledger, skipping OCR/AI")
+                    with upload_lock:
+                        pid_updated = update_pid_date_data(
+                            site, image_url, date_str, '', unique_id, commons_name)
+                    row["upload_status"] = "Skipped (in local upload log)"
+                    with counter_lock:
+                        if pid_updated:
+                            row["pid_date_data_status"] = "Success (logged)"
+                            success_count += 1
+                        else:
+                            row["pid_date_data_status"] = "Failed"
+                            failed_count += 1
                     return
 
                 # Step 1.5 — Archive source URLs to Wayback Machine (Async)

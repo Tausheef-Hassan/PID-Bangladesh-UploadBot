@@ -28,6 +28,27 @@ def find(sha1):
     return None
 
 
+# Statuses whose source URL is known to be on Commons already. title_conflict
+# is left out: only the filename was taken, the image itself may be new.
+_ON_COMMONS = ('uploaded', 'commons_duplicate', 'local_duplicate', 'imported')
+
+
+def uploaded_urls():
+    """Map each source URL already on Commons to its Commons filename."""
+    try:
+        with open(config.UPLOAD_LOG_PATH, encoding='utf-8') as log:
+            records = [json.loads(line) for line in log if line.strip()]
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"could not read local upload log: {e}") from e
+    urls = {}
+    for rec in records:
+        if rec.get('status') in _ON_COMMONS and rec.get('source_url'):
+            urls[rec['source_url']] = rec.get('commons_filename') or rec.get('filename', '')
+    return urls
+
+
 def record(sha1, status, filename, source_url='', commons_filename=''):
     """Append the same SHA-1 event to the all-time and current-year logs."""
     entry = {
